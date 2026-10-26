@@ -33,18 +33,18 @@ script_dir = fileparts(mfilename('fullpath'));
 if isempty(script_dir)
     script_dir = pwd;
 end
-project_root = fileparts(fileparts(fileparts(script_dir)));
-cluster_root = fileparts(fileparts(project_root));
+addpath(fullfile(script_dir, 'utils'));
 mbPulseMatFile = fullfile(script_dir, 'rf_pulses', ...
     'mb2_tse_ls_tbw7_beta150_v1verse_B1max15p000uT.mat');
-pulseq_path = fullfile(cluster_root, 'pulseq');
-legacy_pulseq_path = fullfile(getenv('HOME'), 'Code_mgh', 'pulseq');
-wave_haste_utils = fullfile(cluster_root, 'sources', 'wave-haste', 'utils_seq_haste');
-matlab_utils_path = fullfile(project_root, 'matlab_utils');
 
-% Preserve the calibration output location used by the adjacent source.
-out_path = fullfile(cluster_root, 'scan_protocols', ...
-    '20261015_prisma/tse_product_control');
+% Machine-specific paths are entered interactively and saved beside this
+% script in wave_tse_path_settings.json (ignored by Git). The .seq file and
+% its _geometry_labels.mat/.txt sidecars are written directly to out_path.
+pathSettings = configurePathSettings(script_dir);
+pulseq_path = pathSettings.pulseq_path;
+safe_pns_prediction_path = pathSettings.safe_pns_prediction_path;
+out_path = pathSettings.out_path;
+system_asc_file = pathSettings.system_asc_file;
 
 %% Parameters
 
@@ -140,22 +140,7 @@ blockDurationRaster = 10e-6;
 
 assert(ismember(Ncycles, [10 20]), ...
     'Ncycles must be one of the supported protocol options: 10 or 20.');
-if isfolder(pulseq_path)
-    addpath(fullfile(pulseq_path, 'matlab'));
-elseif isfolder(legacy_pulseq_path)
-    pulseq_path = legacy_pulseq_path;
-    addpath(fullfile(pulseq_path, 'matlab'));
-elseif isempty(which('mr.Sequence'))
-    error('Pulseq MATLAB toolbox was not found. Add it to the MATLAB path.');
-else
-    pulseq_path = fileparts(fileparts(fileparts(which('mr.Sequence'))));
-end
-assert(isfolder(wave_haste_utils), ...
-    'wave-haste sequence utilities were not found: %s', wave_haste_utils);
-assert(isfolder(matlab_utils_path), ...
-    'Pulseq-basic MATLAB utilities were not found: %s', matlab_utils_path);
-addpath(wave_haste_utils);
-addpath(matlab_utils_path);
+addSequenceToolboxPaths(pulseq_path, safe_pns_prediction_path);
 
 assert(psfSlabThickness <= psfFovZ, ...
     'The PSF slab must not excite beyond its encoded z FOV.');
@@ -713,8 +698,9 @@ end
 
 %% PNS/CNS and forbidden-frequency checks
 
+% The gradient model is the system_asc_file path setting, which must match
+% the sys_type entry below.
 if execute_system_check_code
-    ascDir = fullfile(pulseq_path, 'matlab', 'idea', 'asc');
     sysMap = {
         'prisma',             'MP_GPA_K2309_2250V_951A_AS82.asc'
         'prisma_XA30A',       'MP_GPA_K2309_2250V_951A_AS82_XA30A_mod_twoFilesCombined.asc'
@@ -726,8 +712,8 @@ if execute_system_check_code
     };
     idx = find(strcmp(sys_type, sysMap(:,1)), 1);
     assert(~isempty(idx), 'No hardware model is configured for %s.', sys_type);
-    ascName = fullfile(ascDir, sysMap{idx,2});
-    assert(isfile(ascName), 'Scanner hardware model not found: %s', ascName);
+    ascName = requireSystemCheckInputs(sys_type, sysMap{idx,2}, ...
+        system_asc_file, safe_pns_prediction_path);
     warning('off', 'mr:restoreShape');
     [~, tpns] = seq.calcPNS(ascName, false, 0);
     isHasCNS = strcmp(sys_type, 'CimaX');

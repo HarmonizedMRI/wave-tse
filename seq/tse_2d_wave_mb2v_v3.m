@@ -72,21 +72,22 @@ format long
 
 %% Path
 
-pulseq_path='~/Code_mgh/pulseq';  % adjust path as needed
-addpath([pulseq_path '/matlab']);
-addpath('~/Code_mgh/sources/wave-haste/utils_seq_haste');
-addpath('~/Code_mgh/sources/pulseq_basic/matlab_utils');
-
-target_path = '~/Code_mgh/sources/pulseq_basic/matlab/';
-cd(target_path);
-addpath('~/Code_mgh/sources/pulseq_basic/matlab_utils');
-
-out_path = '~/Code_mgh/scan_protocols/20261007_tse_wave_TE15p28_50sl_skyra/';
-
 script_dir = fileparts(mfilename('fullpath'));
 if isempty(script_dir)
     script_dir = pwd;
 end
+addpath(fullfile(script_dir, 'utils'));
+
+% Machine-specific paths are entered interactively and saved beside this
+% script in wave_tse_path_settings.json (ignored by Git). out_path receives
+% the v151/, metadata/ and optional v141/ export folders.
+pathSettings = configurePathSettings(script_dir);
+pulseq_path = pathSettings.pulseq_path;
+safe_pns_prediction_path = pathSettings.safe_pns_prediction_path;
+out_path = ensureTrailingFilesep(pathSettings.out_path);
+system_asc_file = pathSettings.system_asc_file;
+addSequenceToolboxPaths(pulseq_path, safe_pns_prediction_path);
+
 mbPulseMatFile = fullfile(script_dir, 'rf_pulses', ...
     'mb2_tse_ls_tbw7_beta150_v1verse_B1max15p000uT.mat');
 
@@ -1885,10 +1886,10 @@ end
 %% Check PNS/CNS and forbidden frequencies
 
 % Optional scanner-specific PNS/CNS and forbidden-frequency checks. The
-% recorded ASC path is unchanged, and the sequence definition records
-% whether these checks were enabled for this export.
+% gradient model is the system_asc_file path setting, which must match the
+% sys_type entry below, and the sequence definition records whether these
+% checks were enabled for this export.
 if execute_system_check_code
-    ascDir = '~/Code_mgh/pulseq/matlab/idea/asc';
     sysMap = {
         'prisma',            'MP_GPA_K2309_2250V_951A_AS82.asc'
         'prisma_XA30A',      'MP_GPA_K2309_2250V_951A_AS82_XA30A_mod_twoFilesCombined.asc'
@@ -1901,7 +1902,8 @@ if execute_system_check_code
     idx = strcmp(sys_type, sysMap(:,1));
     if any(idx)
         idx = find(idx, 1);
-        ascName = fullfile(ascDir, sysMap{idx, 2});
+        ascName = requireSystemCheckInputs(sys_type, sysMap{idx, 2}, ...
+            system_asc_file, safe_pns_prediction_path);
     else
         if ~isGEscanner
             error('Unknown system : %s, cannot find .asc file\n', sys_type);

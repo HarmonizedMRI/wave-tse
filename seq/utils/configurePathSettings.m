@@ -1,14 +1,25 @@
 function settings = configurePathSettings(scriptDir)
 %CONFIGUREPATHSETTINGS Load, edit, validate, and save local path settings.
 %
-% The settings file is written beside the calling sequence script as:
-%   mprage_flash_path_settings.json
+%   settings = configurePathSettings(scriptDir)
 %
-% Saved fields:
-%   pulseq_path
-%   safe_pns_prediction_path
-%   out_path
-%   system_asc_file
+% Input:
+%   scriptDir  Folder of the calling sequence script (default: pwd). The
+%              settings file is read from and written to this folder as
+%              wave_tse_path_settings.json. All sequence generators in seq/
+%              share this file.
+%
+% Output:
+%   settings   Struct with char fields:
+%                pulseq_path               Pulseq repository root or matlab/
+%                safe_pns_prediction_path  optional; '' skips it
+%                out_path                  sequence output folder
+%                system_asc_file           optional scanner .asc file
+%
+% Side effects:
+%   Prompts in the Command Window, may create out_path, writes the JSON
+%   settings file, and assigns the four fields as variables in the base
+%   workspace.
 %
 % When a saved file exists, the user is always asked whether to reuse it.
 % If reused, the user may update one or more selected path entries. Pressing
@@ -18,7 +29,7 @@ function settings = configurePathSettings(scriptDir)
         scriptDir = pwd;
     end
     scriptDir = normalizeUserPath(scriptDir);
-    settingsFile = fullfile(scriptDir, 'mprage_flash_path_settings.json');
+    settingsFile = fullfile(scriptDir, 'wave_tse_path_settings.json');
 
     defaults = getWorkspaceDefaults();
     defaults.out_path = chooseNonempty(defaults.out_path, pwd);

@@ -36,22 +36,25 @@ format long
 
 %% Path
 
-pulseq_path='~/Code_mgh/pulseq';  % adjust path as needed
-addpath([pulseq_path '/matlab']);
-addpath('~/Code_mgh/sources/wave-haste/utils_seq_haste');
-addpath('~/Code_mgh/sources/pulseq_basic/matlab_utils');
-
-target_path = '~/Code_mgh/sources/pulseq_basic/matlab/';
-cd(target_path);
-
-out_path = '~/Code_mgh/scan_protocols/20261015_prisma/tse_product_control/';
-
-% This MAT filename is shared with the existing MB2 generator. It already
-% contains calibrated single-band excitation and refocusing templates.
 script_dir = fileparts(mfilename('fullpath'));
 if isempty(script_dir)
     script_dir = pwd;
 end
+addpath(fullfile(script_dir, 'utils'));
+
+% Machine-specific paths are entered interactively and saved beside this
+% script in wave_tse_path_settings.json (ignored by Git). out_path receives
+% the v151/ and optional v141/ export folders and the _PEorder.mat sidecar.
+pathSettings = configurePathSettings(script_dir);
+pulseq_path = pathSettings.pulseq_path;
+safe_pns_prediction_path = pathSettings.safe_pns_prediction_path;
+out_path = ensureTrailingFilesep(pathSettings.out_path);
+system_asc_file = pathSettings.system_asc_file;
+addSequenceToolboxPaths(pulseq_path, safe_pns_prediction_path);
+
+% Single-band SigPy templates used only by rfDesign = 'sigpy_9ms'. This MAT
+% is not distributed with the repository; the default conventional_sinc
+% design builds its pulses with Pulseq and needs no RF file.
 mbPulseMatFile = fullfile(script_dir, 'rf_pulses', ...
     ['mb2_tse_20slices_10groups_sep60mm_sigpy_9ms_source_', ...
      'time_stretched_B1max15p000uT.mat']);
@@ -1260,8 +1263,9 @@ end
 
 %% Check PNS/CNS and forbidden frequencies
 
+% The gradient model is the system_asc_file path setting, which must match
+% the sys_type entry below.
 if execute_system_check_code
-    ascDir = '~/Code_mgh/pulseq/matlab/idea/asc';
     sysMap = {
         'prisma',            'MP_GPA_K2309_2250V_951A_AS82.asc'
         'prisma_XA30A',      'MP_GPA_K2309_2250V_951A_AS82_XA30A_mod_twoFilesCombined.asc'
@@ -1274,7 +1278,8 @@ if execute_system_check_code
     idx = strcmp(sys_type, sysMap(:,1));
     if any(idx)
         idx = find(idx, 1);
-        ascName = fullfile(ascDir, sysMap{idx, 2});
+        ascName = requireSystemCheckInputs(sys_type, sysMap{idx, 2}, ...
+            system_asc_file, safe_pns_prediction_path);
     else
         if ~isGEscanner
             error('Unknown system : %s, cannot find .asc file\n', sys_type);
