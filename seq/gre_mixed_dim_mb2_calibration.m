@@ -10,7 +10,7 @@
 % Every acquired ADC has a unique sequential LIN; PAR/SLC/SET/ECO are zero.
 % The sidecar maps ADC records to a 4-by-80 PSF table and a 50-by-32 CSM
 % table. Physical slice positions and ky/kz encoding are not storage counters.
-% See MIXED_CALIBRATION_COMPACT_STORAGE_MIGRATION.md before reconstruction.
+% See docs/calibration_storage.md before reconstruction.
 %
 % SETs 0--3 share one slab-selective RF, one steady-state preparation, and
 % short per-SET settling trains. SET 4 switches to the geometry-matched 2D
