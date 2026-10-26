@@ -1,0 +1,36 @@
+# Local MATLAB path configuration written by seq/utils/configurePathSettings.m
+*path_settings.json
+
+# Generated Pulseq exports and their sidecars
+*.seq
+seq/v141/
+seq/v151/
+seq/metadata/
+*_geometry_labels.txt
+/evaluation/output/
+
+# MATLAB data: only the distributed TBW7 MB2 RF bundle is versioned
+*.mat
+!seq/rf_pulses/mb2_tse_ls_tbw7_beta150_v1verse_B1max15p000uT.mat
+
+# Raw data and reconstruction products
+*.dat
+*.npy
+*.npz
+*.nii
+*.nii.gz
+
+# MATLAB / OS transient files
+*.asv
+.DS_Store
+
+# Python
+__pycache__/
+*.py[codz]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
