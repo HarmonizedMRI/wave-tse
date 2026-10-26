@@ -1,4 +1,21 @@
 function forbiddenFreqCheck(seq, sys, ascName)
+    %FORBIDDENFREQCHECK Report gradient energy in the scanner's acoustic resonance bands.
+    %
+    %   forbiddenFreqCheck(seq, sys, ascName)
+    %
+    % Inputs:
+    %   seq      Pulseq mr.Sequence object.
+    %   sys      Pulseq system struct; 1% of sys.maxGrad [Hz/m] is the band-RMS
+    %            warning threshold (1 kHz/m when maxGrad is unavailable).
+    %   ascName  Siemens gradient-system .asc file with the acoustic
+    %            resonance frequencies and bandwidths.
+    %
+    % No output. Side effects: calls seq.gradSpectrum(ascName), which plots the
+    % gradient spectra against the forbidden bands, prints the threshold used,
+    % and issues a warning for every band whose summed x/y/z gradient RMS
+    % reaches the threshold; the legacy peak ratio is reported in the warning
+    % but not gated. Failures of the energy check become the warning
+    % ForbiddenFreq:PeakCheckFailed instead of an error.
     seq.gradSpectrum(ascName);  % use method API: gradSpectrum(obj, FB_or_ascFile, [fmax], [doPlot])
 
     % Transition mode:

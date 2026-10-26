@@ -66,6 +66,10 @@ function settings = configurePathSettings(scriptDir)
 end
 
 function settings = getWorkspaceDefaults()
+    %GETWORKSPACEDEFAULTS Read path-setting variables from the base workspace.
+    % Returns a settings struct whose fields are taken from same-named char or
+    % string variables in the base workspace (home-expanded); other fields
+    % stay ''.
     settings = emptySettings();
     names = fieldnamesInPromptOrder();
     for ii = 1:numel(names)
@@ -81,6 +85,10 @@ function settings = getWorkspaceDefaults()
 end
 
 function settings = loadSettingsFile(settingsFile, defaults)
+    %LOADSETTINGSFILE Read saved path settings from a JSON file.
+    % settingsFile is the JSON path and defaults the fallback struct. Returns
+    % defaults overridden by the char fields stored in the file; a read or
+    % decode failure issues a warning and returns defaults.
     settings = defaults;
     try
         rawText = fileread(settingsFile);
@@ -104,6 +112,12 @@ function settings = loadSettingsFile(settingsFile, defaults)
 end
 
 function settings = validateAndRepairSettings(settings, defaults)
+    %VALIDATEANDREPAIRSETTINGS Re-prompt for invalid saved paths.
+    % settings is the struct to check and defaults supplies the out_path
+    % fallback. Prompts again for an invalid pulseq_path, safe_pns_prediction
+    % path or system ASC file, offers to create a missing out_path, and
+    % returns the repaired struct. Raises an error when pulseq_path or
+    % out_path is still invalid after the prompts.
     settings = normalizeSettings(settings);
 
     if isempty(settings.pulseq_path) || ~exist(settings.pulseq_path, 'dir')
@@ -152,6 +166,10 @@ function settings = validateAndRepairSettings(settings, defaults)
 end
 
 function settings = promptSelectedSettings(settings, selectedFields)
+    %PROMPTSELECTEDSETTINGS Prompt for the selected path settings.
+    % settings is the current struct and selectedFields a cell array of
+    % field names. Returns the struct with the prompted values. Raises an
+    % error for an unknown field name.
     for ii = 1:numel(selectedFields)
         fieldName = selectedFields{ii};
         currentValue = settings.(fieldName);
@@ -187,6 +205,9 @@ function settings = promptSelectedSettings(settings, selectedFields)
 end
 
 function selectedFields = askWhichSettingsToChange()
+    %ASKWHICHSETTINGSTOCHANGE Ask which saved path settings to edit.
+    % Prompts until one or more menu numbers (1-5) are entered and returns
+    % the selected field names as a cell array in prompt order.
     names = fieldnamesInPromptOrder();
     labels = { ...
         'pulseq_path', ...
@@ -220,6 +241,11 @@ function selectedFields = askWhichSettingsToChange()
 end
 
 function value = promptDirectory(promptText, currentValue, allowEmpty, createIfMissing, emptyDefault)
+    %PROMPTDIRECTORY Prompt until a usable directory path is entered.
+    % promptText describes the setting, currentValue is kept on Enter (or
+    % emptyDefault when currentValue is empty), allowEmpty permits '-' to
+    % return '', and createIfMissing offers to create a missing folder.
+    % Returns the home-expanded directory path.
     if nargin < 5, emptyDefault = ''; end
     currentValue = normalizeUserPath(currentValue);
 
@@ -276,6 +302,9 @@ function value = promptDirectory(promptText, currentValue, allowEmpty, createIfM
 end
 
 function value = promptFile(promptText, currentValue, allowEmpty)
+    %PROMPTFILE Prompt until an existing file path is entered.
+    % promptText describes the setting, currentValue is kept on Enter, and
+    % allowEmpty permits '-' to return ''. Returns the home-expanded path.
     currentValue = normalizeUserPath(currentValue);
 
     while true
@@ -316,6 +345,9 @@ function value = promptFile(promptText, currentValue, allowEmpty)
 end
 
 function tf = askYesNo(promptText, defaultValue)
+    %ASKYESNO Ask a yes/no question in the Command Window.
+    % promptText is the question and defaultValue the answer used on Enter.
+    % Returns a logical answer.
     if defaultValue
         suffix = '[Y/n]';
     else
@@ -342,6 +374,9 @@ function tf = askYesNo(promptText, defaultValue)
 end
 
 function saveSettingsFile(settingsFile, settings)
+    %SAVESETTINGSFILE Write the four path settings as JSON.
+    % settingsFile is the output path and settings the struct to save. No
+    % output; a write failure issues a warning.
     settingsToSave = struct;
     names = fieldnamesInPromptOrder();
     for ii = 1:numel(names)
@@ -362,6 +397,9 @@ function saveSettingsFile(settingsFile, settings)
 end
 
 function assignSettingsToBaseWorkspace(settings)
+    %ASSIGNSETTINGSTOBASEWORKSPACE Copy the path settings to base variables.
+    % Assigns each settings field as a same-named base-workspace variable.
+    % No output.
     names = fieldnamesInPromptOrder();
     for ii = 1:numel(names)
         assignin('base', names{ii}, settings.(names{ii}));
@@ -369,6 +407,8 @@ function assignSettingsToBaseWorkspace(settings)
 end
 
 function settings = normalizeSettings(settings)
+    %NORMALIZESETTINGS Return all four settings as home-expanded char paths.
+    % Missing or non-char fields become ''.
     names = fieldnamesInPromptOrder();
     for ii = 1:numel(names)
         name = names{ii};
@@ -386,6 +426,7 @@ function settings = normalizeSettings(settings)
 end
 
 function settings = emptySettings()
+    %EMPTYSETTINGS Return the settings struct with all four fields set to ''.
     settings = struct( ...
         'pulseq_path', '', ...
         'safe_pns_prediction_path', '', ...
@@ -394,10 +435,12 @@ function settings = emptySettings()
 end
 
 function names = fieldnamesInPromptOrder()
+    %FIELDNAMESINPROMPTORDER Return the setting names in prompt order (cell).
     names = {'pulseq_path', 'safe_pns_prediction_path', 'out_path', 'system_asc_file'};
 end
 
 function value = chooseNonempty(primaryValue, fallbackValue)
+    %CHOOSENONEMPTY Return primaryValue, or fallbackValue when it is empty.
     if ~isempty(primaryValue)
         value = primaryValue;
     else

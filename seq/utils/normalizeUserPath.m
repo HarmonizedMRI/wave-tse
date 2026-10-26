@@ -1,4 +1,15 @@
 function pathValue = normalizeUserPath(pathValue)
+%NORMALIZEUSERPATH Trim a user-entered path and expand a leading '~'.
+%
+%   pathValue = normalizeUserPath(pathValue)
+%
+% Input:
+%   pathValue  char or string path; empty input is returned unchanged.
+%
+% Output:
+%   pathValue  char path without surrounding whitespace, with '~' or '~/...'
+%              replaced by the home directory (HOME, or USERPROFILE on
+%              Windows).
     if isempty(pathValue)
         return;
     end

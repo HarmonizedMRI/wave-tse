@@ -1545,6 +1545,11 @@ end
 %% Local helper functions
 
 function idx = makeAcceleratedIndexList(N, R)
+    %MAKEACCELERATEDINDEXLIST One-based PE indices on the centered stride grid.
+    % N is the full PE matrix size and R the integer acceleration factor.
+    % Returns the row vector of one-based indices ii in 1..N with
+    % mod(ii - (floor(N/2)+1), R) == 0, so the k-space center line is always
+    % included. Raises an error unless R is a positive integer.
     if R < 1 || R ~= round(R)
         error('Acceleration factor must be a positive integer.');
     end
@@ -1558,6 +1563,13 @@ function idx = makeAcceleratedIndexList(N, R)
 end
 
 function idxCrop = centerCropIndexListToMultiple(idx, centerIdx, blockSize)
+    %CENTERCROPINDEXLISTTOMULTIPLE Keep a centered run of complete echo trains.
+    % idx is an ascending PE index list, centerIdx the one-based k-space center
+    % index and blockSize the echo-train length. Returns the contiguous
+    % sub-list of floor(numel(idx)/blockSize)*blockSize entries centered on
+    % the entry closest to centerIdx and shifted inward at the list ends.
+    % Raises an error for an empty list, a non-integer blockSize, or fewer
+    % candidates than one echo train.
     if isempty(idx)
         error('Cannot crop an empty PE index list.');
     end
@@ -1578,6 +1590,11 @@ function idxCrop = centerCropIndexListToMultiple(idx, centerIdx, blockSize)
 end
 
 function idx = makeCenterIndexList(N, Ncenter)
+    %MAKECENTERINDEXLIST Contiguous one-based indices around the PE center.
+    % N is the full PE matrix size and Ncenter the requested block size,
+    % clipped to N. Returns Ncenter consecutive one-based indices starting at
+    % floor(N/2)+1-floor(Ncenter/2), shifted to stay inside 1..N. Raises an
+    % error unless Ncenter is a positive integer.
     if Ncenter < 1 || Ncenter ~= round(Ncenter)
         error('Center block size must be a positive integer.');
     end
@@ -1792,6 +1809,16 @@ function [gWave, area, timing] = defineSineReadoutWaveTSE( ...
         channel, Tread, adcDelay, readoutBlockDur, sys, Ncycles, ...
         gwave_max, swave_max, physical_slew_max, adc, ...
         waveInfoFlag, debugFlag)
+    %DEFINESINEREADOUTWAVETSE Build an ADC-aligned full-block sine gradient.
+    % Inputs are the physical gradient channel, the active ADC duration Tread
+    % and ADC delay [s], the complete readout-block duration [s], Pulseq
+    % system limits, sine cycles, requested amplitude gwave_max [mT/m] and
+    % slew swave_max [T/m/s], the physical slew limit [T/m/s], the ADC event,
+    % and print flags. Outputs are the zero-delay arbitrary gradient spanning
+    % the block (zero outside the ADC window and at its first and last active
+    % samples), its zeroth moment [1/m], and a struct of realized sample
+    % counts, timing, amplitude and slew. Errors are raised for raster, ADC
+    % alignment, block-duration, amplitude or slew inconsistencies.
     dt = sys.gradRasterTime;
     [G0, w, TreadRaster] = designWaveAmplitude(Tread, sys, Ncycles, ...
         gwave_max, swave_max, physical_slew_max, 'sine', waveInfoFlag);
@@ -1886,6 +1913,16 @@ function [gWave, area, timing] = defineSineReadoutWaveTSE( ...
 end
 
 function [G0_pulseq, w, TreadRaster] = designWaveAmplitude(Tread, sys, Ncycles, gwave_max, swave_max, physical_slew_max, waveName, waveInfoFlag)
+    %DESIGNWAVEAMPLITUDE Choose the Wave amplitude allowed by the slew limit.
+    % Tread is the active Wave duration [s] on the gradient raster, sys the
+    % Pulseq system struct, Ncycles the cycle count (10 or 20), gwave_max the
+    % requested amplitude [mT/m], swave_max and physical_slew_max slew limits
+    % [T/m/s], waveName a label and waveInfoFlag a print switch. Returns the
+    % amplitude G0_pulseq [Hz/m] (the requested value, reduced when the
+    % sampled sine/cosine raster slew would exceed the smaller slew limit),
+    % the angular frequency w [rad/s] and the rasterized duration TreadRaster
+    % [s]. Errors are raised for an unsupported cycle count or a non-positive
+    % or off-raster Tread.
     if ~ismember(Ncycles, [10 20])
         error('Ncycles must be one of the supported protocol options: 10 or 20.');
     end
@@ -1939,6 +1976,14 @@ end
 
 function assertArbitraryWaveformWithinSystem( ...
         waveform, firstValue, lastValue, system, segmentName)
+    %ASSERTARBITRARYWAVEFORMWITHINSYSTEM Check an arbitrary gradient against limits.
+    % waveform holds the raster samples [Hz/m] of a Pulseq arbitrary gradient
+    % and firstValue/lastValue its block-boundary values; system supplies
+    % maxGrad [Hz/m], maxSlew [Hz/m/s] and gradRasterTime, and segmentName
+    % labels the error message. The slew includes the half-raster steps
+    % between the boundary values and the first/last samples. No output; an
+    % assertion error is raised when either limit is exceeded by more than a
+    % relative 1e-10.
     waveform = waveform(:);
     slew = [2*(firstValue-waveform(1)); ...
         waveform(2:end)-waveform(1:end-1); ...

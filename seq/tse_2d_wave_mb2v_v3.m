@@ -2941,6 +2941,14 @@ end
 
 function assertArbitraryWaveformWithinSystem( ...
         waveform, firstValue, lastValue, system, segmentName)
+    %ASSERTARBITRARYWAVEFORMWITHINSYSTEM Check an arbitrary gradient against limits.
+    % waveform holds the raster samples [Hz/m] of a Pulseq arbitrary gradient
+    % and firstValue/lastValue its block-boundary values; system supplies
+    % maxGrad [Hz/m], maxSlew [Hz/m/s] and gradRasterTime, and segmentName
+    % labels the error message. The slew includes the half-raster steps
+    % between the boundary values and the first/last samples. No output; an
+    % assertion error is raised when either limit is exceeded by more than a
+    % relative 1e-10.
     waveform = waveform(:);
     slew = [2*(firstValue-waveform(1)); ...
         waveform(2:end)-waveform(1:end-1); ...
