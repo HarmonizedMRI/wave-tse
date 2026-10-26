@@ -29,3 +29,6 @@ test = [
 [tool.uv]
 package = false
 default-groups = ["recon"]
+
+[tool.pytest.ini_options]
+testpaths = ["evaluation/tests"]
