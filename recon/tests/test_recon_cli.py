@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import nibabel as nib
 import numpy as np
@@ -13,6 +14,8 @@ import pypulseq as pp
 import torch
 
 import recon_wave_tse_from_twix_nifti as cli
+from utils.l1_noise_model import colored_noise
+from utils.mb2_cg_sense_wave import cg_sense_mb2_wave_2d, mb2_wave_forward
 from utils.wave_cg_sense_precondition import fftc_dim
 
 
@@ -31,6 +34,62 @@ def unit_rss_sensitivities(ncoil, nx, nx_os, ny, seed):
     sens = np.zeros((ncoil, nx_os, ny), np.complex64)
     sens[:, cli.native_rows(nx, nx_os)] = maps
     return torch.as_tensor(sens)
+
+
+def synthetic_mb2_group(ncoil=8, nx=32, nx_os=96, ny=128, seed=10, psf=None):
+    """Return ``group_terms``-like MB2 Ry2 terms, the receiver profile and the CAIPI-encoded truth.
+
+    Broad smooth unit-RSS coil maps cover the native rows; band 1 carries a
+    FOV/4 CAIPI shift. The data are the encoded truth plus colored noise with
+    correlated coils and a readout profile that is flat (1.3) inside and
+    rolls off to 0.3 at both readout edges.
+
+    Returns:
+        tuple: ``(terms, profile)``.
+    """
+    rng = np.random.default_rng(seed)
+    x, y = np.mgrid[:nx, :ny] / np.array([nx, ny])[:, None, None]
+    sens = np.zeros((2, ncoil, nx_os, ny), np.complex64)
+    for band in range(2):
+        maps = np.stack([np.exp(-((x - rng.uniform()) ** 2 + (y - rng.uniform()) ** 2) / .08)
+                         * np.exp(2j * np.pi * (rng.uniform() + .3 * rng.uniform() * (x + y)))
+                         for _ in range(ncoil)])
+        sens[band, :, cli.native_rows(nx, nx_os)] = maps / np.sqrt(np.sum(abs(maps) ** 2, axis=0))
+    phase = np.ones((2, ny), np.complex64)
+    phase[1] = np.exp(2j * np.pi * np.arange(ny) / 4)
+    mask = np.zeros(ny, np.float32)
+    mask[::2] = 1
+    truth = np.zeros((2, nx_os, ny), np.complex64)
+    truth[:, cli.native_rows(nx, nx_os)] = 20 * (np.cos(4 * x) + 1j * np.sin(3 * y))[None]
+    a = rng.standard_normal((ncoil, ncoil)) + 1j * rng.standard_normal((ncoil, ncoil))
+    cov = a @ a.conj().T / ncoil + np.eye(ncoil)
+    u = abs(np.arange(nx_os) - nx_os / 2) / (nx_os / 2)
+    profile = np.where(u < .6, 1.3, 1.3 - (u - .6) / .4)
+    terms = {"sens": torch.as_tensor(sens), "phase": torch.as_tensor(phase),
+             "psf": torch.ones((2, nx_os, ny), dtype=torch.complex64) if psf is None else psf,
+             "mask": torch.as_tensor(mask[None, None]), "raw_sli": 0, "physical": np.array([0, 1]),
+             "lines": np.flatnonzero(mask)}
+    clean = mb2_wave_forward(torch.as_tensor(truth), terms["sens"], terms["phase"], terms["psf"], terms["mask"])
+    terms["data"] = (clean + colored_noise(cov, profile, (ncoil, nx_os, ny), seed + 1)) * terms["mask"]
+    return terms, profile
+
+
+def lambda0_fit(terms):
+    """Return the lambda-0 solution and its predicted k-space for ``terms``."""
+    solution = cg_sense_mb2_wave_2d(terms["data"], terms["sens"], terms["phase"], terms["psf"], terms["mask"],
+                                    n_iter=500, tol=1e-8, verbose=False)
+    return solution, mb2_wave_forward(solution, terms["sens"], terms["phase"], terms["psf"], terms["mask"])
+
+
+def fake_slice_worker(physical, twix, labels, folders, basis):
+    """Stand in for the ESPIRiT worker: save the slice index and the worker's OMP_NUM_THREADS.
+
+    Returns:
+        float: Zero seconds.
+    """
+    np.savez(folders["arrays"] / f"csm_diagnostics_{physical:02d}.npz", threads=os.environ.get("OMP_NUM_THREADS"))
+    np.save(folders["cache"] / f"csm_slice_{physical:02d}.npy", np.full(2, physical))
+    return 0.
 
 
 def translated_excitation_sequence(positions, sign):
@@ -134,6 +193,30 @@ class SliceMappingTests(unittest.TestCase):
         self.assertTrue(report["method"].startswith("RF waveform"))
 
 
+class CalibrationMapTests(unittest.TestCase):
+    """Check the parallel ESPIRiT scheduling (the ESPIRiT call itself is replaced)."""
+
+    def test_parallel_workers_fill_only_missing_slices(self):
+        """Spawned single-threaded workers fill the missing slices; diagnostics without a map are refused."""
+        meta = {"csmAdcIndices": np.zeros((4, 1), int)}
+        threads = os.environ.get("OMP_NUM_THREADS")
+        with tempfile.TemporaryDirectory() as tmp:
+            folders = cli.output_folders(tmp)
+            np.save(folders["cache"] / "csm_slice_01.npy", np.zeros(1))
+            with mock.patch.object(cli, "estimate_slice_map_worker", fake_slice_worker), \
+                    mock.patch.object(cli.LOGGER, "disabled", True):
+                cli.estimate_maps({"twix": None, "labels": None}, None, None, meta, None, folders, -1, 2)
+            self.assertEqual(os.environ.get("OMP_NUM_THREADS"), threads)
+            for p in (0, 2, 3):
+                np.testing.assert_array_equal(np.load(folders["cache"] / f"csm_slice_{p:02d}.npy"), [p, p])
+                with np.load(folders["arrays"] / f"csm_diagnostics_{p:02d}.npz") as saved:
+                    self.assertEqual(str(saved["threads"]), "1")
+            np.testing.assert_array_equal(np.load(folders["cache"] / "csm_slice_01.npy"), [0])
+            (folders["cache"] / "csm_slice_03.npy").unlink()
+            with self.assertRaises(ValueError):
+                cli.estimate_maps({"twix": None, "labels": None}, None, None, meta, None, folders, -1, 2)
+
+
 class SolverTests(unittest.TestCase):
     """Check the exact MB1 solution and the MB2 operator gate."""
 
@@ -165,6 +248,148 @@ class SolverTests(unittest.TestCase):
             self.assertLess(report["adjoint_error"], 1e-5)
             self.assertTrue(report["solver"]["converged"])
             cli.operator_tests(sens, phase, psf, mask, folders, 400, 1e-6)
+
+
+class L1Tests(unittest.TestCase):
+    """Check the L1 settings, the per-scan noise profile and the per-group L1 solve."""
+
+    def test_tags_and_support(self):
+        """Tags encode C and non-default FISTA settings; MB1 and indivisible matrices are refused."""
+        self.assertEqual(cli.l1_tag(.5, 3, 300, 1e-4), "l1c0p5")
+        self.assertEqual(cli.l1_tag(1, 2, 600, 1e-5), "l1c1_lev2_it600_tol1e-05")
+        meta = {"Nx": 440, "Ny": 220}
+        cli.check_l1_support({"MB": 2}, meta, 2)
+        for audit, levels in (({"MB": 1}, 2), ({"MB": 2}, 3)):
+            with self.assertRaises(ValueError):
+                cli.check_l1_support(audit, meta, levels)
+
+    def test_noise_profile_corrects_the_fit_leverage(self):
+        """The corrected profile recovers the FOV noise level that the raw lambda-0 residual underestimates."""
+        terms, profile = synthetic_mb2_group(ny=256)
+        rows = cli.native_rows(32, 96)
+        _, prediction = lambda0_fit(terms)
+        cov, whitener, whitening = cli.l1_group_whitening(terms, prediction)
+        self.assertLess(whitening["margin_leakage"], 1e-6)
+        result = cli.noise_profile_from_fit(terms, prediction, cov, whitener, rows, 500, 1e-8)
+        margin = cli.far_margin_rows(96, cli.L1_MARGIN_FRACTION)
+        expected = profile[rows].mean() / profile[margin].mean()
+        level = whitening["margin_variance_mean"]
+        # Two band unknowns per four coil samples remain at Ry2 with 8 coils: the
+        # unwhitened fit of correlated-coil noise leaves at least half of it.
+        remaining = result["synthetic_power"][rows].mean() / level
+        self.assertTrue(.5 <= remaining < .8, remaining)
+        self.assertAlmostEqual(result["relative_variance"][rows].mean() / expected, 1, delta=.05)
+        self.assertAlmostEqual(result["measured_power"][rows].mean() / level / expected, remaining, delta=.05)
+        self.assertAlmostEqual(result["relative_variance"][margin].mean(), 1, delta=.05)
+
+    def test_noise_profile_gates(self):
+        """Wave spread into the margins, too few data per unknown and too few outer lines are refused."""
+        rng = np.random.default_rng(11)
+        spread = torch.as_tensor(np.exp(1j * rng.uniform(-3, 3, (2, 96, 128))).astype(np.complex64))
+        terms, _ = synthetic_mb2_group(psf=spread)
+        with self.assertRaises(ValueError):
+            cli.l1_group_whitening(terms, lambda0_fit(terms)[1])
+        rows = cli.native_rows(32, 96)
+        terms, _ = synthetic_mb2_group(ncoil=4)
+        _, prediction = lambda0_fit(terms)
+        cov, whitener, _ = cli.l1_group_whitening(terms, prediction)
+        with self.assertRaisesRegex(ValueError, "too few data per unknown|did not converge"):
+            cli.noise_profile_from_fit(terms, prediction, cov, whitener, rows, 500, 1e-8)
+        terms, _ = synthetic_mb2_group()
+        _, prediction = lambda0_fit(terms)
+        cov, whitener, _ = cli.l1_group_whitening(terms, prediction)
+        terms["lines"] = terms["lines"][abs(terms["lines"] - 64) < 50]
+        with self.assertRaisesRegex(ValueError, "outer"):
+            cli.noise_profile_from_fit(terms, prediction, cov, whitener, rows, 500, 1e-8)
+
+    def test_l1_group_uses_the_noise_null(self):
+        """lambda_b is C * sigma_b * diagonal_b; FISTA stays finite, native-row only and fits less tightly."""
+        terms, profile = synthetic_mb2_group()
+        rows = cli.native_rows(32, 96)
+        start, prediction = lambda0_fit(terms)
+        cov, whitener, _ = cli.l1_group_whitening(terms, prediction)
+        regions = np.ones((2, 32, 128), bool)
+        regions[:, :4] = False
+        relative = profile / profile[cli.far_margin_rows(96, cli.L1_MARGIN_FRACTION)].mean()
+        null = cli.l1_noise_null(3, terms, cov, whitener, relative, regions, rows, 500, 1e-8)
+        self.assertEqual(null["seed"], cli.L1_NULL_SEED + 3)
+        self.assertTrue(all(s > 0 for s in null["sigma_lambda0_noise_rms"]))
+        self.assertEqual(null, cli.l1_noise_null(3, terms, cov, whitener, relative, regions, rows, 500, 1e-8))
+        args = argparse.Namespace(l1_threshold_multiple=.5, l1_wavelet_levels=2, l1_max_iterations=60,
+                                  l1_tolerance=1e-4)
+        x, report = cli.solve_l1_group(terms, start, whitener, null, rows, args)
+        np.testing.assert_allclose(report["lambda"], [.5 * s * d for s, d in zip(
+            null["sigma_lambda0_noise_rms"], null["normal_diagonal"])])
+        self.assertTrue(torch.isfinite(x).all())
+        self.assertTrue(torch.all(x[:, :rows.start] == 0) and torch.all(x[:, rows.stop:] == 0))
+        measured = terms["data"] * terms["mask"]
+        self.assertGreater(report["relative_data_residual"], cli.relative_norm(prediction - measured, measured))
+
+    def test_reconstruct_l1_writes_once_and_resumes(self):
+        """The L1 stage writes every product once, resumes from it and shares noise nulls across C."""
+        groups = [synthetic_mb2_group(seed=seed)[0] for seed in (40, 41, 42)]
+        rows = cli.native_rows(32, 96)
+        meta = {"Nx": 32, "Ny": 128, "Nx_os": 96, "Nslices": 6}
+        encoding = {"pairs": np.array([[0, 3], [1, 4], [2, 5]]),
+                    "mask": np.stack([t["mask"][0, 0].numpy() for t in groups])}
+        baseline = np.zeros((32, 128, 6), np.complex64)
+        for terms, pair in zip(groups, encoding["pairs"]):
+            baseline[:, :, pair] = lambda0_fit(terms)[0][:, rows].numpy().transpose(1, 2, 0)
+        yaps = {("sSliceArray", "asSlice", "0", "dReadoutFOV"): 16.0,
+                ("sSliceArray", "asSlice", "0", "dPhaseFOV"): 128.0,
+                ("sSliceArray", "asSlice", "0", "dThickness"): 3.0,
+                ("sSliceArray", "asSlice", "0", "sNormal", "dTra"): 1.0,
+                ("sSliceArray", "asSlice", "0", "sPosition", "dTra"): 0.0}
+        scan = {"hdr": {"MeasYaps": yaps, "Meas": {}, "Protocol": {}}}
+        audit = {"MB": 2, "voxel_mm": [.5, 1., 3.], "center_sct_mm": [0., 0., 0.]}
+        args = argparse.Namespace(l1_threshold_multiple=.5, l1_wavelet_levels=2, l1_max_iterations=40,
+                                  l1_tolerance=1e-4, max_iterations=500, tolerance=1e-8, device="cpu",
+                                  min_free_gib=0)
+        rng = np.random.default_rng(43)
+        with tempfile.TemporaryDirectory() as tmp:
+            calibration_folders = cli.output_folders(Path(tmp) / "calibration")
+            folders = cli.output_folders(Path(tmp) / "tse")
+            for p in range(6):
+                cli.save_npz(calibration_folders["arrays"] / f"csm_diagnostics_{p:02d}.npz",
+                             calibration_rss=rng.uniform(size=(32, 128)).astype(np.float32))
+            cli.save_npy(folders["arrays"] / "lambda0_complex_physical_slices.npy", baseline)
+
+            def run(threshold_multiple):
+                """Run the L1 stage with group data taken from ``groups``."""
+                args.l1_threshold_multiple = threshold_multiple
+                with mock.patch.object(cli, "group_terms", side_effect=lambda scan, group, *_: groups[group]) \
+                        as loader, mock.patch.object(cli, "l1_noise_null", wraps=cli.l1_noise_null) as null, \
+                        mock.patch.object(cli.LOGGER, "disabled", True):
+                    image, reports = cli.reconstruct_l1(scan, meta, None, calibration_folders, folders, encoding,
+                                                        None, None, audit, args, baseline)
+                return image, reports, loader.call_count, null.call_count
+
+            image, reports, loads, nulls = run(.5)
+            self.assertEqual((loads, nulls), (4, 3))
+            tag = "l1c0p5_lev2_it40"
+            for name in ("cache/l1_noise_profile.npz", "reports/l1_noise_profile.json",
+                         "figures/l1_noise_profile.png", "reports/l1_noise_null_group_02.json",
+                         f"arrays/{tag}_group_02.npy", f"arrays/{tag}_complex_physical_slices.npy",
+                         f"nifti/{tag}_magnitude.nii.gz", f"reports/{tag}_completed.json"):
+                self.assertTrue((Path(tmp) / "tse" / name).exists(), name)
+            profile = json.loads((folders["reports"] / "l1_noise_profile.json").read_text())
+            self.assertEqual(profile["group_0based"], 1)
+            np.testing.assert_array_equal(image[:, :, [1, 4]],
+                                          np.load(folders["arrays"] / f"{tag}_group_01.npy").transpose(1, 2, 0))
+            again, _, loads, nulls = run(.5)
+            np.testing.assert_array_equal(again, image)
+            self.assertEqual((loads, nulls), (0, 0))
+            stronger, reports_c1, loads, nulls = run(1.)
+            self.assertEqual((loads, nulls), (3, 0))
+            self.assertTrue(np.allclose([r["lambda"][0] for r in reports_c1],
+                                        [2 * r["lambda"][0] for r in reports]))
+            self.assertFalse(np.array_equal(stronger, image))
+            report_path = folders["reports"] / f"{tag}_group_00.json"
+            report = json.loads(report_path.read_text())
+            report["noise_profile_sha256"] = "0" * 64
+            report_path.write_text(json.dumps(report))
+            with self.assertRaisesRegex(ValueError, "another noise profile"):
+                run(.5)
 
 
 class InputOutputTests(unittest.TestCase):

@@ -26,7 +26,9 @@ Description:
     MB1 data must form a complete no-Wave Cartesian grid; each slice is the
     exact least-squares coil combination. MB2 data are solved per SMS group
     with lambda-0 CG-SENSE through the MB2 Wave operator, after real-grid
-    adjoint and synthetic-recovery tests.
+    adjoint and synthetic-recovery tests. With ``--l1-threshold-multiple``,
+    MB2 groups are also solved with L1-wavelet FISTA, starting from lambda 0,
+    with band weights scaled by the measured noise of this scan.
 
 Notes:
     - Every output file is written exclusively; nothing is overwritten.
@@ -40,10 +42,13 @@ Notes:
 """
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import gc
 import hashlib
 import json
 import logging
+import multiprocessing
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -64,7 +69,12 @@ from utils.compact_calibration_import import (
     compare_direct_slice_fourier_z, index_compact_streams, load_compact_metadata,
     open_twix, read_compact_records, read_records,
 )
+from utils.l1_noise_model import (
+    colored_noise, far_margin_rows, margin_covariance, margin_leakage, margin_whitener, normal_diagonal,
+    outer_lines, region_rms, whitened_hybrid_power,
+)
 from utils.mb2_cg_sense_wave import cg_sense_mb2_wave_2d, mb2_wave_adjoint, mb2_wave_forward
+from utils.mb2_wave_l1_wavelet import fista_l1_wavelet_mb2_wave, normal_operator_norm
 from utils.nifti_affine_twix import make_nifti_affine_from_twix
 from utils.noise_prewhitening import (
     estimate_noise_covariance, load_twix_noise_samples_coillast, make_noise_whitener,
@@ -81,6 +91,21 @@ ARTIFACT_FOLDERS = ("arrays", "cache", "nifti", "figures", "reports", "logs")
 ESPIRIT_CALIB_WIDTH = 24
 ESPIRIT_CROP = 0
 SOLVER_TAG = "lambda0"
+
+# L1-wavelet FISTA and its noise model; the FISTA defaults are those of the
+# TerraX 2026-10-25 R2x4 research reconstruction.
+L1_WAVELET = "db4"
+L1_DEFAULT_LEVELS = 3
+L1_DEFAULT_MAX_ITERATIONS = 300
+L1_DEFAULT_TOLERANCE = 1e-4
+L1_MARGIN_FRACTION = 0.2          # width of each far readout margin / oversampled readout
+L1_OUTER_LINE_FRACTION = 0.3      # outer part of the PE grid used for the residual profile
+L1_MIN_OUTER_LINES = 8
+L1_REGION_THRESHOLD = 0.1         # sigma region: FLASH calibration RSS above 10% of the slice peak
+L1_NULL_SEED = 20261025           # the noise-only solve of group g uses L1_NULL_SEED + g
+L1_PROFILE_SEED = 20261026        # synthetic noise of the fit-leverage estimate
+L1_MAX_MARGIN_LEAKAGE = 1e-2      # predicted signal power / data power in the far margins
+L1_MIN_RESIDUAL_FRACTION = 0.2    # smallest noise fraction the lambda-0 fit may leave in the FOV
 
 
 def main():
@@ -132,12 +157,15 @@ def main():
                                 args.allow_missing_final_adcs)
     LOGGER.info("Audit passed: MB%d, Ry %d, Wave %s, %d groups",
                 audit["MB"], audit["Ry"], audit["wave"], len(encoding["pairs"]))
+    if args.l1_threshold_multiple is not None:
+        check_l1_support(audit, meta, args.l1_wavelet_levels)
     if args.stage == "audit":
         return
 
     basis, whitener = prepare_common_basis(inputs["calibration"], calibration_scan, record_index,
                                            meta, calibration_folders, args.virtual_coils)
-    estimate_maps(calibration_scan, record_index, meta, basis, calibration_folders, args.csm_device)
+    estimate_maps(inputs["calibration"], calibration_scan, record_index, meta, basis, calibration_folders,
+                  args.csm_device, args.csm_workers)
     psf_fit = None
     if audit["wave"]:
         psf_fit = prepare_psf(calibration_scan, record_index, meta, cal_encoding, calibration_folders,
@@ -158,6 +186,9 @@ def main():
                                                   max(residuals)],
         "nifti": nifti, "calibration_dir": str(calibration_folders["reports"].parent)})
     LOGGER.info("Reconstruction complete: %s", nifti["magnitude"])
+    if args.l1_threshold_multiple is not None:
+        reconstruct_l1(tse_scan, meta, basis, calibration_folders, folders, encoding, cal_encoding,
+                       psf_fit, audit, args, image)
 
 
 def parse_arguments():
@@ -195,6 +226,9 @@ def parse_arguments():
     group.add_argument("--device", default="cpu", help="Torch device of the TSE solver (cpu or cuda).")
     group.add_argument("--csm-device", type=int, default=-1,
                        help="SigPy device of ESPIRiT: -1 for CPU, a GPU index otherwise (needs CuPy).")
+    group.add_argument("--csm-workers", type=int, default=1,
+                       help="Parallel single-threaded CPU processes for ESPIRiT, one slice each "
+                            "(default: 1, serial).")
     group.add_argument("--threads", type=int, help="CPU threads for PyTorch (default: PyTorch's choice).")
     group.add_argument("--virtual-coils", type=int, default=20,
                        help="Number of compressed virtual coils (default: 20).")
@@ -212,6 +246,19 @@ def parse_arguments():
                             "lines are treated as unsampled (default: 0).")
     group.add_argument("--min-free-gib", type=float, default=10,
                        help="Stop before writing when the output filesystem has less free space.")
+    group = parser.add_argument_group("L1-wavelet regularization (MB2 only)")
+    group.add_argument("--l1-threshold-multiple", type=float, metavar="C",
+                       help="Also reconstruct with L1-wavelet FISTA at lambda_b = C * sigma_b * mean "
+                            "diag(A^H A)_b, where sigma_b is the lambda-0 noise RMS of band b "
+                            "(C = 0.5 on the TerraX R2x4 scan); default: lambda 0 only.")
+    group.add_argument("--l1-wavelet-levels", type=int, default=L1_DEFAULT_LEVELS,
+                       help="Periodized db4 levels; both native matrix sizes must be divisible by "
+                            f"2**levels (default: {L1_DEFAULT_LEVELS}).")
+    group.add_argument("--l1-max-iterations", type=int, default=L1_DEFAULT_MAX_ITERATIONS,
+                       help=f"FISTA iteration budget per group (default: {L1_DEFAULT_MAX_ITERATIONS}).")
+    group.add_argument("--l1-tolerance", type=float, default=L1_DEFAULT_TOLERANCE,
+                       help="FISTA stops when the relative image change falls below this value "
+                            f"(default: {L1_DEFAULT_TOLERANCE:g}).")
     args = parser.parse_args()
     if args.virtual_coils < 1 or args.max_iterations < 1 or args.allow_missing_final_adcs < 0:
         parser.error("Virtual coils and iterations must be positive; missing ADCs nonnegative")
@@ -219,6 +266,12 @@ def parse_arguments():
         parser.error("--tolerance must lie in (0, 1)")
     if args.psf_fit_range is not None and not 0 <= args.psf_fit_range[0] < args.psf_fit_range[1]:
         parser.error("--psf-fit-range needs 0 <= START < STOP")
+    if args.csm_workers < 1 or (args.csm_workers > 1 and args.csm_device >= 0):
+        parser.error("--csm-workers must be positive and needs --csm-device -1 when above 1")
+    if args.l1_threshold_multiple is not None and not 0 < args.l1_threshold_multiple < np.inf:
+        parser.error("--l1-threshold-multiple must be positive and finite")
+    if args.l1_wavelet_levels < 1 or args.l1_max_iterations < 1 or not 0 < args.l1_tolerance < 1:
+        parser.error("L1 wavelet levels and iterations must be positive; --l1-tolerance in (0, 1)")
     return args
 
 
@@ -917,10 +970,14 @@ def prepare_common_basis(paths, scan, record_index, meta, folders, virtual_coils
     return basis, whitener
 
 
-def estimate_maps(scan, record_index, meta, basis, folders, device):
+def estimate_maps(paths, scan, record_index, meta, basis, folders, device, workers):
     """Save unit-RSS crop-0 ESPIRiT maps independently for every physical slice.
 
+    SigPy's CPU ESPIRiT runs on one thread, so with ``workers > 1`` the slices
+    are estimated in parallel processes that each reopen the calibration.
+
     Args:
+        paths: Calibration inputs (``twix``, ``labels``), reopened by workers.
         scan: Header-only calibration measurement.
         record_index: Global-LIN record index of the calibration streams.
         meta: Compact calibration sidecar.
@@ -929,36 +986,101 @@ def estimate_maps(scan, record_index, meta, basis, folders, device):
             ``cache/csm_slice_XX.npy`` (virtual coil, Nx, Ny) and
             ``arrays/csm_diagnostics_XX.npz``.
         device: SigPy device index (-1 for CPU).
+        workers: Number of parallel CPU processes (1: serial in this process).
 
     Raises:
-        ValueError: If a map is nonfinite or its coil RSS is not one.
+        ValueError: If a slice has diagnostics without its map, or a map is
+            nonfinite or its coil RSS is not one.
     """
-    nx, ny, nx_os = int(meta["Nx"]), int(meta["Ny"]), int(meta["Nx_os"])
-    native_rows(nx, nx_os)
-    acs_start = csm_acs_start(meta)
-    for physical, row in enumerate(meta["csmAdcIndices"]):
-        path = folders["cache"] / f"csm_slice_{physical:02d}.npy"
-        if path.exists():
-            continue
+    nslices = len(meta["csmAdcIndices"])
+    todo = [p for p in range(nslices) if not (folders["cache"] / f"csm_slice_{p:02d}.npy").exists()]
+    partial = [p for p in todo if (folders["arrays"] / f"csm_diagnostics_{p:02d}.npz").exists()]
+    if partial:
+        raise ValueError(f"CSM diagnostics without maps for physical slices {partial}; move them aside")
+    if workers > 1 and len(todo) > 1:
+        # Single-threaded numerical libraries in every spawned worker.
+        saved = {key: os.environ.get(key) for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")}
+        os.environ.update({key: "1" for key in saved})
+        try:
+            with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn")) as pool:
+                futures = {pool.submit(estimate_slice_map_worker, p, paths["twix"], paths["labels"], folders,
+                                       basis): p for p in todo}
+                try:
+                    for done, future in enumerate(as_completed(futures), start=nslices - len(todo) + 1):
+                        seconds = future.result()
+                        LOGGER.info("CSM saved: physical slice %d, %d/%d done, %.0f s", futures[future] + 1,
+                                    done, nslices, seconds)
+                except BaseException:
+                    pool.shutdown(cancel_futures=True)
+                    raise
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        return
+    for physical in todo:
         # (readout sample, ky line, slice=1, coil) compact ACS of one direct slice.
-        data = read_compact_records(scan, record_index, row)
-        maps, diagnostic = estimate_espirit_csm_2d_slicewise(
-            torch.from_numpy(data[:, :, None]), basis, encoded_matrix=(nx, ny),
-            acs_start_y=acs_start, readout_os_factor=nx_os // nx, sigpy_device=sp.Device(device),
-            calib_width=ESPIRIT_CALIB_WIDTH, crop=ESPIRIT_CROP, return_diagnostics=True)
-        maps = maps[..., 0]
-        power = np.sum(abs(maps)**2, axis=0)
-        if not np.isfinite(maps).all() or np.max(abs(power - 1)) > 1e-4:
-            raise ValueError("Nonfinite or non-unit-RSS crop-0 maps")
-        save_npz(folders["arrays"] / f"csm_diagnostics_{physical:02d}.npz",
-                 **{key: value[..., 0] for key, value in diagnostic.items()})
-        save_npy(path, maps)
-        LOGGER.info("CSM saved: physical slice %d/%d", physical + 1, len(meta["csmAdcIndices"]))
-        del maps, diagnostic, data
+        data = read_compact_records(scan, record_index, meta["csmAdcIndices"][physical])
+        estimate_slice_map(physical, data, basis, meta, folders, device)
+        LOGGER.info("CSM saved: physical slice %d/%d", physical + 1, nslices)
+        del data
         gc.collect()
         if device >= 0:
             import cupy as cp
             cp.get_default_memory_pool().free_all_blocks()
+
+
+def estimate_slice_map(physical, data, basis, meta, folders, device):
+    """Estimate, validate and save the crop-0 ESPIRiT map of one physical slice.
+
+    Args:
+        physical: Zero-based physical slice index.
+        data: Compact ACS records (readout sample, ky line, coil).
+        basis: Coil-compression basis.
+        meta: Compact calibration sidecar.
+        folders: Calibration output folders.
+        device: SigPy device index (-1 for CPU).
+
+    Raises:
+        ValueError: If the map is nonfinite or its coil RSS is not one.
+    """
+    nx, ny, nx_os = int(meta["Nx"]), int(meta["Ny"]), int(meta["Nx_os"])
+    native_rows(nx, nx_os)
+    maps, diagnostic = estimate_espirit_csm_2d_slicewise(
+        torch.from_numpy(data[:, :, None]), basis, encoded_matrix=(nx, ny),
+        acs_start_y=csm_acs_start(meta), readout_os_factor=nx_os // nx, sigpy_device=sp.Device(device),
+        calib_width=ESPIRIT_CALIB_WIDTH, crop=ESPIRIT_CROP, return_diagnostics=True)
+    maps = maps[..., 0]
+    power = np.sum(abs(maps)**2, axis=0)
+    if not np.isfinite(maps).all() or np.max(abs(power - 1)) > 1e-4:
+        raise ValueError(f"Nonfinite or non-unit-RSS crop-0 maps of physical slice {physical}")
+    # The map is written last; it marks the slice as complete.
+    save_npz(folders["arrays"] / f"csm_diagnostics_{physical:02d}.npz",
+             **{key: value[..., 0] for key, value in diagnostic.items()})
+    save_npy(folders["cache"] / f"csm_slice_{physical:02d}.npy", maps)
+
+
+def estimate_slice_map_worker(physical, twix, labels, folders, basis):
+    """Estimate one slice map in a worker process on one CPU thread.
+
+    Args:
+        physical: Zero-based physical slice index.
+        twix, labels: Calibration TWIX file and compact sidecar.
+        folders: Calibration output folders.
+        basis: Coil-compression basis.
+
+    Returns:
+        float: Seconds spent on the slice, including reopening the TWIX file.
+    """
+    start = time.time()
+    torch.set_num_threads(1)
+    meta = load_compact_metadata(labels)
+    scan = open_twix(twix)
+    data = read_compact_records(scan, index_compact_streams(scan, meta), meta["csmAdcIndices"][physical])
+    estimate_slice_map(physical, data, basis, meta, folders, -1)
+    return time.time() - start
 
 
 def prepare_psf(scan, record_index, meta, cal_encoding, folders, whitener, fit_range, c_fallback):
@@ -1238,6 +1360,41 @@ def wave_psf(physical, meta, cal_encoding, psf_fit, ny):
     return np.exp(1j * angle).astype(np.complex64)
 
 
+def group_terms(scan, group, meta, basis, calibration_folders, encoding, cal_encoding, psf_fit, audit, device):
+    """Return the measured data and the encoding terms of one slice group.
+
+    Args:
+        scan: Header-only TSE measurement.
+        group: Zero-based group index.
+        meta: Compact calibration sidecar.
+        basis: Coil-compression basis.
+        calibration_folders: Calibration output folders (CSM cache).
+        encoding: ``audit_tse`` encoding arrays.
+        cal_encoding: ``audit_calibration`` result.
+        psf_fit: ``prepare_psf`` coefficients or None without Wave.
+        audit: ``audit_tse`` report.
+        device: Torch device of the tensors.
+
+    Returns:
+        dict: Tensors ``data`` (virtual coil, Nx_os, Ny), ``sens`` (band,
+        virtual coil, Nx_os, Ny), ``phase`` (band, Ny), ``psf`` (band, Nx_os,
+        Ny; ones without Wave) and ``mask`` (1, 1, Ny), plus ``raw_sli``,
+        the ``physical`` slice indices and the sampled ``lines``.
+    """
+    nx_os, ny = int(meta["Nx_os"]), int(meta["Ny"])
+    physical = encoding["pairs"][group]
+    data, sli = load_group_data(scan, group, basis, encoding, nx_os, ny)
+    psf = np.ones((len(physical), nx_os, ny), np.complex64)
+    if audit["wave"]:
+        psf = wave_psf(physical, meta, cal_encoding, psf_fit, ny)
+    return {"data": torch.as_tensor(data, device=device),
+            "sens": group_sensitivities(physical, calibration_folders, nx_os).to(device),
+            "phase": torch.as_tensor(encoding["phase"][group], device=device),
+            "psf": torch.as_tensor(psf, device=device),
+            "mask": torch.as_tensor(encoding["mask"][group][None, None], device=device),
+            "raw_sli": sli, "physical": physical, "lines": np.flatnonzero(encoding["mask"][group] > 0)}
+
+
 def mb1_least_squares(data, sens, phase):
     """Return the exact least-squares MB1 image of a complete Cartesian grid.
 
@@ -1395,11 +1552,9 @@ def reconstruct_groups(scan, meta, basis, calibration_folders, folders, encoding
                              f"{report_path.name} aside or use a new output folder")
         else:
             require_free_space(folders["arrays"], args.min_free_gib)
-            data, sli = load_group_data(scan, group, basis, encoding, nx_os, ny)
-            data = torch.as_tensor(data, device=device)
-            sens = group_sensitivities(physical, calibration_folders, nx_os).to(device)
-            phase = torch.as_tensor(encoding["phase"][group], device=device)
-            mask = torch.as_tensor(encoding["mask"][group][None, None], device=device)
+            terms = group_terms(scan, group, meta, basis, calibration_folders, encoding, cal_encoding,
+                                psf_fit, audit, device)
+            data, sens, phase, psf, mask = (terms[key] for key in ("data", "sens", "phase", "psf", "mask"))
             if audit["MB"] == 1:
                 if audit["wave"] or not np.all(encoding["mask"][group] == 1):
                     raise ValueError("The exact MB1 solution needs a complete no-Wave grid")
@@ -1407,18 +1562,15 @@ def reconstruct_groups(scan, meta, basis, calibration_folders, folders, encoding
                 info = {"method": "exact least-squares coil combination of a complete grid",
                         "converged": True}
             else:
-                psf = np.ones((len(physical), nx_os, ny), np.complex64)
-                if audit["wave"]:
-                    psf = wave_psf(physical, meta, cal_encoding, psf_fit, ny)
-                psf = torch.as_tensor(psf, device=device)
                 operator_tests(sens, phase, psf, mask, folders, args.max_iterations, args.tolerance)
                 result, info = cg_sense_mb2_wave_2d(data, sens, phase, psf, mask, n_iter=args.max_iterations,
                                                     tol=args.tolerance, lambda_l2=0, verbose=False,
                                                     return_info=True)
                 prediction = mb2_wave_forward(result, sens, phase, psf, mask)
             recovered = result[:, rows].cpu().numpy().astype(np.complex64)
-            report = {"group_0based": group, "physical_indices_0based": physical.tolist(), "raw_sli": sli,
-                      "sampled_lines": int(encoding["mask"][group].sum()), "solver": info,
+            report = {"group_0based": group, "physical_indices_0based": physical.tolist(),
+                      "raw_sli": terms["raw_sli"], "sampled_lines": int(encoding["mask"][group].sum()),
+                      "solver": info,
                       "relative_data_residual": relative_norm(prediction - data * mask, data * mask),
                       "device": str(device), "shared_basis_sha256": basis_digest}
             if not np.isfinite(recovered).all() or not info["converged"]:
@@ -1430,7 +1582,7 @@ def reconstruct_groups(scan, meta, basis, calibration_folders, folders, encoding
             save_json(report_path, report)
             LOGGER.info("Group %d/%d physical %s residual %.6f", group + 1, len(encoding["pairs"]),
                         physical.tolist(), report["relative_data_residual"])
-            del data, sens, phase, mask, result, prediction
+            del terms, data, sens, phase, psf, mask, result, prediction
             gc.collect()
             if device.type == "cuda":
                 torch.cuda.empty_cache()
@@ -1441,6 +1593,483 @@ def reconstruct_groups(scan, meta, basis, calibration_folders, folders, encoding
         save_npy(path, image)
     elif not np.array_equal(np.load(path), image):
         raise ValueError("Existing assembled volume differs from the group checkpoints")
+    return image, reports
+
+
+def l1_tag(threshold_multiple, levels, max_iterations, tolerance):
+    """Return the file tag of one L1-wavelet setting.
+
+    Args:
+        threshold_multiple: ``--l1-threshold-multiple`` C.
+        levels, max_iterations, tolerance: FISTA settings.
+
+    Returns:
+        str: ``l1c<C>`` with the decimal point written as ``p`` (``l1c0p5``
+        for C = 0.5), followed by ``_lev<n>``, ``_it<n>`` or ``_tol<t>`` for
+        each FISTA setting that differs from its default.
+    """
+    tag = "l1c" + f"{threshold_multiple:g}".replace(".", "p")
+    if levels != L1_DEFAULT_LEVELS:
+        tag += f"_lev{levels}"
+    if max_iterations != L1_DEFAULT_MAX_ITERATIONS:
+        tag += f"_it{max_iterations}"
+    if tolerance != L1_DEFAULT_TOLERANCE:
+        tag += f"_tol{tolerance:g}"
+    return tag
+
+
+def check_l1_support(audit, meta, levels):
+    """Stop before any reconstruction when L1-wavelet regularization cannot run.
+
+    Args:
+        audit: ``audit_tse`` report.
+        meta: Compact calibration sidecar (native matrix).
+        levels: Periodized wavelet levels.
+
+    Raises:
+        ValueError: For MB1 data or a native matrix whose sizes are not
+            divisible by ``2**levels``.
+    """
+    if audit["MB"] != 2:
+        raise ValueError("L1-wavelet regularization is implemented for MB2 scans only")
+    nx, ny = int(meta["Nx"]), int(meta["Ny"])
+    if nx % 2**levels or ny % 2**levels:
+        raise ValueError(f"The native {nx} x {ny} matrix does not allow {levels} periodized wavelet levels; "
+                         "choose --l1-wavelet-levels so that both sizes are divisible by 2**levels")
+
+
+def l1_settings(args):
+    """Return the settings record of one L1-wavelet run.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        dict: Penalty, FISTA and noise-model settings, stored as
+        ``reports/<tag>_settings.json``; results of the same tag with other
+        settings are rejected.
+    """
+    return {"threshold_multiple": args.l1_threshold_multiple, "wavelet": L1_WAVELET,
+            "levels": args.l1_wavelet_levels,
+            "penalty": "complex soft threshold of each band image separately on the native rows; "
+                       "coarsest approximation band not penalized",
+            "lambda": "C * sigma_b * mean diag(A^H A)_b after far-margin whitening",
+            "fista_max_iterations": args.l1_max_iterations, "fista_tolerance": args.l1_tolerance,
+            "start": "lambda-0 solution", "lipschitz": "1.05 x 30-iteration power estimate",
+            "sigma_region": f"FLASH calibration RSS > {L1_REGION_THRESHOLD:g} x slice peak (crop-0 maps)",
+            "noise_null_seed": f"{L1_NULL_SEED} + group",
+            "noise_model": {"far_margin_fraction_per_side": L1_MARGIN_FRACTION,
+                            "outer_line_fraction": L1_OUTER_LINE_FRACTION,
+                            "profile_group": "number of groups // 2", "profile_seed": L1_PROFILE_SEED}}
+
+
+def pad_native(images, rows, nx_os):
+    """Embed native band images into the oversampled readout grid.
+
+    Args:
+        images: Complex array (band, Nx, Ny).
+        rows: Native readout rows of the oversampled grid.
+        nx_os: Oversampled readout size.
+
+    Returns:
+        torch.Tensor: complex64 (band, Nx_os, Ny) on the CPU, zero outside
+        ``rows``.
+    """
+    full = torch.zeros((images.shape[0], nx_os, images.shape[2]), dtype=torch.complex64)
+    full[:, rows] = torch.as_tensor(np.ascontiguousarray(images, dtype=np.complex64))
+    return full
+
+
+def sigma_regions(physical, calibration_folders):
+    """Return the regions in which the noise RMS and the normal diagonal are averaged.
+
+    Args:
+        physical: Physical slice indices of the bands.
+        calibration_folders: Calibration output folders (CSM diagnostics).
+
+    Returns:
+        numpy.ndarray: Boolean (band, Nx, Ny), true where the FLASH
+        calibration RSS exceeds 10% of its slice peak.
+    """
+    regions = []
+    for p in physical:
+        with np.load(calibration_folders["arrays"] / f"csm_diagnostics_{p:02d}.npz") as saved:
+            rss = saved["calibration_rss"]
+        regions.append(rss > L1_REGION_THRESHOLD * rss.max())
+    return np.stack(regions)
+
+
+def l1_group_whitening(terms, prediction):
+    """Return the far-margin noise covariance and coil whitener of one group.
+
+    Args:
+        terms: :func:`group_terms` result.
+        prediction: k-space predicted by the lambda-0 solution of the group.
+
+    Returns:
+        tuple: ``(cov, whitener, report)``; complex128 (coil, coil) arrays and
+        a JSON summary with the margin leakage and the coil variances.
+
+    Raises:
+        ValueError: If the lambda-0 prediction carries more than 1% of the
+            data power of the far margins, i.e. Wave-spread signal would enter
+            the noise covariance.
+    """
+    margin = far_margin_rows(terms["data"].shape[1], L1_MARGIN_FRACTION)
+    cov = margin_covariance(terms["data"], terms["lines"], margin)
+    whitener = margin_whitener(cov)
+    leakage = margin_leakage(terms["data"], prediction, whitener, terms["lines"], margin)
+    if leakage > L1_MAX_MARGIN_LEAKAGE:
+        raise ValueError(f"The lambda-0 prediction holds {leakage:.2%} of the far-margin power; "
+                         "the Wave spread reaches the noise margins")
+    variance = np.real(np.diag(cov))
+    return cov, whitener, {"margin_samples_per_side": len(margin) // 2, "margin_leakage": leakage,
+                           "margin_variance_mean": float(variance.mean()),
+                           "margin_variance_relative_min_max": [float(variance.min() / np.median(variance)),
+                                                                float(variance.max() / np.median(variance))]}
+
+
+def noise_profile_from_fit(terms, prediction, cov, whitener, rows, max_iterations, tolerance):
+    """Estimate the readout noise-variance profile from one lambda-0 fit.
+
+    The residual of the outer PE lines holds noise only, but inside the FOV
+    the fit absorbs part of it (about the ratio of unknowns to data). The
+    same fit applied to synthetic noise with the far-margin covariance and a
+    flat profile measures the fraction it leaves at every readout sample; the
+    ratio of the two residual powers is the noise variance relative to the
+    far margins.
+
+    Args:
+        terms: :func:`group_terms` result of one MB2 group.
+        prediction: k-space predicted by its lambda-0 solution.
+        cov, whitener: :func:`l1_group_whitening` results.
+        rows: Native readout rows.
+        max_iterations, tolerance: CG settings of the lambda-0 fit.
+
+    Returns:
+        dict: ``relative_variance``, ``measured_power`` and
+        ``synthetic_power`` (Nx_os,), the ``outer_lines`` used and the
+        synthetic ``solver`` information.
+
+    Raises:
+        ValueError: With fewer than 8 outer lines, a nonconverged synthetic
+            solve, or when the fit leaves less than 20% of the noise power
+            somewhere in the FOV (too few data per unknown).
+    """
+    data, sens, phase, psf, mask = (terms[key] for key in ("data", "sens", "phase", "psf", "mask"))
+    nx_os, ny = data.shape[1:]
+    outer = outer_lines(terms["lines"], ny, L1_OUTER_LINE_FRACTION)
+    if len(outer) < L1_MIN_OUTER_LINES:
+        raise ValueError(f"Only {len(outer)} sampled PE lines lie in the outer {L1_OUTER_LINE_FRACTION:.0%} "
+                         f"of the grid; the noise profile needs at least {L1_MIN_OUTER_LINES}")
+    measured = whitened_hybrid_power(data * mask - prediction, whitener, outer)
+    # Synthetic noise with the far-margin covariance and a flat readout profile,
+    # solved exactly like the measured data.
+    noise = colored_noise(cov, np.ones(nx_os), tuple(data.shape), L1_PROFILE_SEED).to(data.device) * mask
+    solution, info = cg_sense_mb2_wave_2d(noise, sens, phase, psf, mask, n_iter=max_iterations, tol=tolerance,
+                                          lambda_l2=0, verbose=False, return_info=True)
+    if not info["converged"]:
+        raise ValueError("The synthetic noise solve of the noise profile did not converge")
+    synthetic = whitened_hybrid_power(noise - mb2_wave_forward(solution, sens, phase, psf, mask), whitener, outer)
+    remaining = synthetic / np.real(np.diag(cov)).mean()
+    if remaining[rows].min() < L1_MIN_RESIDUAL_FRACTION:
+        raise ValueError(f"The lambda-0 fit leaves only {remaining[rows].min():.1%} of the noise power in the "
+                         "FOV; too few data per unknown to estimate the noise profile")
+    return {"relative_variance": measured / synthetic, "measured_power": measured,
+            "synthetic_power": synthetic, "outer_lines": outer, "solver": info}
+
+
+def estimate_noise_profile(scan, meta, basis, calibration_folders, folders, encoding, cal_encoding, psf_fit,
+                           audit, args, baseline):
+    """Estimate, or reload, the readout noise-variance profile of this scan.
+
+    Uses the central slice group and its lambda-0 solution; see
+    :func:`noise_profile_from_fit`.
+
+    Args:
+        scan, meta, basis, calibration_folders, encoding, cal_encoding, psf_fit, audit:
+            As for :func:`group_terms`.
+        folders: TSE output folders; writes ``cache/l1_noise_profile.npz``,
+            ``reports/l1_noise_profile.json`` and
+            ``figures/l1_noise_profile.png``.
+        args: Parsed arguments (device and CG settings).
+        baseline: lambda-0 volume (Nx, Ny, physical slice).
+
+    Returns:
+        tuple: ``(relative_variance, sha256)``, float64 (Nx_os,) and the
+        digest of the cache file.
+
+    Raises:
+        ValueError: If saved files are partial or changed, or a gate of
+            :func:`l1_group_whitening` or :func:`noise_profile_from_fit`
+            fails.
+    """
+    cache = folders["cache"] / "l1_noise_profile.npz"
+    report_path = folders["reports"] / "l1_noise_profile.json"
+    if cache.exists() and report_path.exists():
+        report = json.loads(report_path.read_text())
+        if digest(cache) != report["profile_sha256"]:
+            raise ValueError(f"Changed noise profile: {cache}")
+        with np.load(cache) as saved:
+            return saved["relative_variance"], report["profile_sha256"]
+    if cache.exists() or report_path.exists():
+        raise ValueError(f"Partial noise profile; move {cache.name} or {report_path.name} aside")
+    nx, ny, nx_os = int(meta["Nx"]), int(meta["Ny"]), int(meta["Nx_os"])
+    rows = native_rows(nx, nx_os)
+    group = len(encoding["pairs"]) // 2
+    terms = group_terms(scan, group, meta, basis, calibration_folders, encoding, cal_encoding, psf_fit, audit,
+                        torch.device(args.device))
+    start = pad_native(baseline[:, :, terms["physical"]].transpose(2, 0, 1), rows, nx_os)
+    prediction = mb2_wave_forward(start.to(terms["data"].device), terms["sens"], terms["phase"], terms["psf"],
+                                  terms["mask"])
+    cov, whitener, whitening = l1_group_whitening(terms, prediction)
+    result = noise_profile_from_fit(terms, prediction, cov, whitener, rows, args.max_iterations, args.tolerance)
+    del prediction, terms
+    margin = far_margin_rows(nx_os, L1_MARGIN_FRACTION)
+    save_npz(cache, margin=margin, **{key: result[key] for key in (
+        "relative_variance", "measured_power", "synthetic_power", "outer_lines")})
+    width, level = len(margin) // 2, whitening["margin_variance_mean"]
+    regions = {"far_margins": margin, "inner_margins": np.r_[width:rows.start, rows.stop:nx_os - width],
+               "native_fov": np.arange(rows.start, rows.stop)}
+
+    def region_means(profile):
+        """Return the mean of a readout profile in each nonempty readout region."""
+        return {name: float(profile[index].mean()) for name, index in regions.items() if len(index)}
+
+    figure = folders["figures"] / "l1_noise_profile.png"
+    if not figure.exists():
+        plot_noise_profile(result, level, rows, margin, figure)
+    report = {"method": "lambda-0 residual power of the outer PE lines divided by the residual power that "
+                        "the same fit leaves of flat-profile synthetic noise",
+              "group_0based": group, "physical_indices_0based": encoding["pairs"][group].tolist(),
+              "sampled_lines": int(encoding["mask"][group].sum()), "outer_lines_used": len(result["outer_lines"]),
+              "outer_line_rule": f"|line - {ny // 2}| > {(1 - L1_OUTER_LINE_FRACTION) * ny / 2:g}",
+              **whitening, "synthetic_seed": L1_PROFILE_SEED, "synthetic_solver": result["solver"],
+              "relative_variance_mean": region_means(result["relative_variance"]),
+              "uncorrected_relative_variance_mean": region_means(result["measured_power"] / level),
+              "remaining_noise_fraction_mean": region_means(result["synthetic_power"] / level),
+              "remaining_noise_fraction_min_in_fov": float((result["synthetic_power"] / level)[rows].min()),
+              "profile_sha256": digest(cache)}
+    save_json(report_path, report)
+    LOGGER.info("Noise profile from group %d: FOV variance %.3f x far margins (uncorrected %.3f)", group,
+                report["relative_variance_mean"]["native_fov"],
+                report["uncorrected_relative_variance_mean"]["native_fov"])
+    return result["relative_variance"], report["profile_sha256"]
+
+
+def plot_noise_profile(result, level, rows, margin, path):
+    """Plot the readout noise profile, its uncorrected estimate and the noise fraction left by the fit.
+
+    Args:
+        result: :func:`noise_profile_from_fit` result.
+        level: Mean far-margin noise variance (whitened units).
+        rows: Native readout rows.
+        margin: Far-margin readout samples.
+        path: New PNG file.
+    """
+    x = np.arange(len(result["relative_variance"]))
+    fig, ax = plt.subplots(figsize=(9, 4))
+    ax.axvspan(rows.start, rows.stop, color="0.9", label="native FOV")
+    width = len(margin) // 2
+    for index, (start, stop) in enumerate(((0, width), (len(x) - width, len(x)))):
+        ax.axvspan(start, stop, color="tab:green", alpha=.12, label=None if index else "far margins")
+    ax.plot(x, result["relative_variance"], lw=.6, label="noise variance / far-margin mean")
+    ax.plot(x, result["measured_power"] / level, lw=.6, label="lambda-0 residual, uncorrected")
+    ax.plot(x, result["synthetic_power"] / level, lw=.6, label="noise fraction left by the fit")
+    ax.set_xlabel("readout sample")
+    ax.set_ylim(bottom=0)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    with Path(path).open("xb") as handle:
+        fig.savefig(handle, format="png", dpi=120)
+    plt.close(fig)
+
+
+def l1_noise_null(group, terms, cov, whitener, profile, regions, rows, max_iterations, tolerance):
+    """Return the lambda-0 noise RMS, the normal diagonal and the Lipschitz constant of one group.
+
+    Noise drawn from the measured model (far-margin covariance times the
+    readout profile) is whitened and solved like the data with lambda 0.
+
+    Args:
+        group: Zero-based group index; the seed is ``L1_NULL_SEED + group``.
+        terms: :func:`group_terms` result.
+        cov, whitener: :func:`l1_group_whitening` results.
+        profile: Readout noise-variance profile (Nx_os,).
+        regions: :func:`sigma_regions` result.
+        rows: Native readout rows.
+        max_iterations, tolerance: CG settings.
+
+    Returns:
+        dict: ``sigma_lambda0_noise_rms`` and ``normal_diagonal`` per band,
+        ``lipschitz``, the seed, the region sizes and the solver information.
+
+    Raises:
+        ValueError: If the noise-only solve does not converge.
+    """
+    device = terms["data"].device
+    wt = torch.as_tensor(whitener.astype(np.complex64), device=device)
+    sens = torch.einsum("cd,bdkl->bckl", wt, terms["sens"])
+    noise = colored_noise(cov, profile, tuple(terms["data"].shape), L1_NULL_SEED + group).to(device)
+    noisy = torch.einsum("cd,dkl->ckl", wt, noise) * terms["mask"]
+    del noise
+    image, info = cg_sense_mb2_wave_2d(noisy, sens, terms["phase"], terms["psf"], terms["mask"],
+                                       n_iter=max_iterations, tol=tolerance, lambda_l2=0, verbose=False,
+                                       return_info=True)
+    if not info["converged"]:
+        raise ValueError(f"The noise-only solve of group {group} did not converge")
+    line_fraction = float(terms["mask"].mean())
+    return {"seed": L1_NULL_SEED + group,
+            "sigma_lambda0_noise_rms": region_rms(image[:, rows].cpu().numpy(), regions),
+            "normal_diagonal": normal_diagonal(sens, rows, regions, line_fraction),
+            "lipschitz": 1.05 * normal_operator_norm(sens, terms["phase"], terms["psf"], terms["mask"]),
+            "region_voxels": regions.sum(axis=(1, 2)).tolist(), "noise_solver": info}
+
+
+def solve_l1_group(terms, start, whitener, null, rows, args):
+    """Solve one whitened MB2 group with L1-wavelet FISTA.
+
+    Args:
+        terms: :func:`group_terms` result.
+        start: lambda-0 solution (band, Nx_os, Ny) on the device.
+        whitener: Far-margin coil whitener.
+        null: :func:`l1_noise_null` result.
+        rows: Native readout rows.
+        args: Parsed arguments (threshold multiple and FISTA settings).
+
+    Returns:
+        tuple: ``(x, report)``; the solution (band, Nx_os, Ny) and a summary
+        with the band weights, the FISTA information and the unwhitened
+        relative data residual.
+    """
+    lam = [args.l1_threshold_multiple * s * d
+           for s, d in zip(null["sigma_lambda0_noise_rms"], null["normal_diagonal"])]
+    wt = torch.as_tensor(whitener.astype(np.complex64), device=start.device)
+    sens = torch.einsum("cd,bdkl->bckl", wt, terms["sens"])
+    data = torch.einsum("cd,dkl->ckl", wt, terms["data"]) * terms["mask"]
+    x, info = fista_l1_wavelet_mb2_wave(data, sens, terms["phase"], terms["psf"], terms["mask"], lam, rows,
+                                        x0=start, n_iter=args.l1_max_iterations, tol=args.l1_tolerance,
+                                        lipschitz=null["lipschitz"], wavelet=L1_WAVELET,
+                                        levels=args.l1_wavelet_levels)
+    del sens, data
+    changes = info.pop("relative_change_history")
+    measured = terms["data"] * terms["mask"]
+    prediction = mb2_wave_forward(x, terms["sens"], terms["phase"], terms["psf"], terms["mask"])
+    return x, {"threshold_multiple": args.l1_threshold_multiple, "lambda": lam, "fista": info,
+               "fista_relative_change_last10": changes[-10:],
+               "relative_data_residual": relative_norm(prediction - measured, measured)}
+
+
+def reconstruct_l1(scan, meta, basis, calibration_folders, folders, encoding, cal_encoding, psf_fit, audit,
+                   args, baseline):
+    """Reconstruct every MB2 group with L1-wavelet FISTA and export the volume.
+
+    Per group: far-margin whitening, a noise-only lambda-0 solve that sets
+    sigma_b, and FISTA from the lambda-0 solution with
+    ``lambda_b = C * sigma_b * mean diag(A^H A)_b``. The noise-only results
+    do not depend on C and are shared by every L1 setting of the folder.
+
+    Args:
+        scan, meta, basis, calibration_folders, encoding, cal_encoding, psf_fit, audit:
+            As for :func:`reconstruct_groups`.
+        folders: TSE output folders.
+        args: Parsed arguments.
+        baseline: lambda-0 volume (Nx, Ny, physical slice).
+
+    Returns:
+        tuple: complex64 L1 volume (Nx, Ny, physical slice) and the group
+        reports.
+
+    Raises:
+        ValueError: If a checkpoint or saved noise result is partial or
+            changed, a noise-model gate fails or a result is not finite.
+    """
+    nx, ny, nx_os, nslices = (int(meta[key]) for key in ("Nx", "Ny", "Nx_os", "Nslices"))
+    rows = native_rows(nx, nx_os)
+    device = torch.device(args.device)
+    tag = l1_tag(args.l1_threshold_multiple, args.l1_wavelet_levels, args.l1_max_iterations, args.l1_tolerance)
+    ensure_json(folders["reports"] / f"{tag}_settings.json", l1_settings(args))
+    profile, profile_digest = estimate_noise_profile(scan, meta, basis, calibration_folders, folders, encoding,
+                                                     cal_encoding, psf_fit, audit, args, baseline)
+    image = np.zeros((nx, ny, nslices), np.complex64)
+    reports = []
+    for group, physical in enumerate(encoding["pairs"]):
+        path = folders["arrays"] / f"{tag}_group_{group:02d}.npy"
+        report_path = folders["reports"] / f"{tag}_group_{group:02d}.json"
+        if path.exists() and report_path.exists():
+            report = json.loads(report_path.read_text())
+            if digest(path) != report["checkpoint_sha256"] or report["physical_indices_0based"] != physical.tolist():
+                raise ValueError(f"Changed checkpoint of group {group}: {path}")
+            if report["noise_profile_sha256"] != profile_digest:
+                raise ValueError(f"L1 checkpoint of group {group} belongs to another noise profile: {path}")
+            recovered = np.load(path)
+        elif path.exists() or report_path.exists():
+            raise ValueError(f"Partial checkpoint of group {group}; move {path.name} or "
+                             f"{report_path.name} aside or use a new output folder")
+        else:
+            require_free_space(folders["arrays"], args.min_free_gib)
+            terms = group_terms(scan, group, meta, basis, calibration_folders, encoding, cal_encoding, psf_fit,
+                                audit, device)
+            start = pad_native(baseline[:, :, physical].transpose(2, 0, 1), rows, nx_os).to(device)
+            prediction = mb2_wave_forward(start, terms["sens"], terms["phase"], terms["psf"], terms["mask"])
+            cov, whitener, whitening = l1_group_whitening(terms, prediction)
+            del prediction
+            # The noise-only solve does not depend on C; it is saved once per group and profile.
+            null_path = folders["reports"] / f"l1_noise_null_group_{group:02d}.json"
+            if null_path.exists():
+                null = json.loads(null_path.read_text())
+                if null["noise_profile_sha256"] != profile_digest or \
+                        null["physical_indices_0based"] != physical.tolist():
+                    raise ValueError(f"Noise-only result of another profile or group: {null_path}")
+            else:
+                null = {"physical_indices_0based": physical.tolist(), "noise_profile_sha256": profile_digest,
+                        **whitening, **l1_noise_null(group, terms, cov, whitener, profile,
+                                                     sigma_regions(physical, calibration_folders), rows,
+                                                     args.max_iterations, args.tolerance)}
+                save_json(null_path, null)
+            x, details = solve_l1_group(terms, start, whitener, null, rows, args)
+            recovered = x[:, rows].cpu().numpy().astype(np.complex64)
+            report = {"group_0based": group, "physical_indices_0based": physical.tolist(),
+                      "raw_sli": terms["raw_sli"], "sampled_lines": len(terms["lines"]),
+                      "sigma_lambda0_noise_rms": null["sigma_lambda0_noise_rms"],
+                      "normal_diagonal": null["normal_diagonal"], "lipschitz": null["lipschitz"], **details,
+                      "noise_null_report": null_path.name, "noise_profile_sha256": profile_digest,
+                      "device": str(device)}
+            if not np.isfinite(recovered).all():
+                save_json(folders["reports"] / f"{tag}_group_{group:02d}_failed_"
+                          f"{time.strftime('%Y%m%d_%H%M%S')}.json", report)
+                raise ValueError(f"L1 group {group} is not finite")
+            if not details["fista"]["converged"]:
+                LOGGER.warning("L1 group %d used the full budget of %d FISTA iterations", group,
+                               args.l1_max_iterations)
+            save_npy(path, recovered)
+            report["checkpoint_sha256"] = digest(path)
+            save_json(report_path, report)
+            LOGGER.info("L1 group %d/%d physical %s lambda %s, %d FISTA iterations", group + 1,
+                        len(encoding["pairs"]), physical.tolist(), ["%.3e" % v for v in details["lambda"]],
+                        details["fista"]["iterations"])
+            del terms, start, x
+            gc.collect()
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+        image[:, :, physical] = recovered.transpose(1, 2, 0)
+        reports.append(report)
+    path = folders["arrays"] / f"{tag}_complex_physical_slices.npy"
+    if not path.exists():
+        save_npy(path, image)
+    elif not np.array_equal(np.load(path), image):
+        raise ValueError("Existing assembled L1 volume differs from the group checkpoints")
+    nifti = export_volume(image, scan, audit, folders, tag)
+    residuals = [r["relative_data_residual"] for r in reports]
+    ensure_json(folders["reports"] / f"{tag}_completed.json", {
+        "groups": len(reports), "shape": list(image.shape), "voxel_size_mm": audit["voxel_mm"],
+        "volume_sha256": digest(path), "noise_profile_sha256": profile_digest,
+        "lambda0_volume_sha256": digest(folders["arrays"] / f"{SOLVER_TAG}_complex_physical_slices.npy"),
+        "fista_converged_groups": sum(bool(r["fista"]["converged"]) for r in reports),
+        "relative_data_residual_min_median_max": [min(residuals), float(np.median(residuals)),
+                                                  max(residuals)],
+        "nifti": nifti, "calibration_dir": str(calibration_folders["reports"].parent)})
+    LOGGER.info("L1 reconstruction complete: %s", nifti["magnitude"])
     return image, reports
 
 
