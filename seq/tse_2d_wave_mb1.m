@@ -80,6 +80,10 @@ alpha          = 90;                         % [deg]
 ETL            = 17;                         % editable matched range: 8...17
 TE1Requested   = 107e-3/7;                   % [s], ESP
 TEeffRequested = 107e-3;                     % [s], snapped to nearest echo within ETL
+% Shortest accepted ESP. It equals the floor of tse_2d_wave_mb2v_v3.m so that
+% every MB1 control can match an MB2 export; the MB1 timing alone allows
+% shorter spacings.
+minimumEchoSpacing = 14.89e-3;               % [s]
 minimumSupportedETL = 8;
 maximumSupportedETL = 17;
 assert(isscalar(ETL) && isfinite(ETL) && ETL == round(ETL) && ...
@@ -89,6 +93,9 @@ assert(isscalar(ETL) && isfinite(ETL) && ETL == round(ETL) && ...
 assert(isscalar(TE1Requested) && isfinite(TE1Requested) && ...
        TE1Requested > 0, ...
     'TE1Requested must be one positive finite scalar in seconds.');
+assert(TE1Requested >= minimumEchoSpacing - 1e-9, ...
+    'TE1Requested %.6f ms is below the %.6f ms ESP floor.', ...
+    TE1Requested*1e3, minimumEchoSpacing*1e3);
 turboFactor    = ETL;
 Nechoes        = 1;                          % ICE-visible echo dimension: TSE is single-echo/contrast
 necho          = ETL;                        % keep standard TSE loop variable name

@@ -78,8 +78,8 @@ is not scanner, profile or production approved, and the sequence definitions
 record these flags.
 
 - **MB2 TSE.** The generator loads the bundle at line 91 and accepts only this
-  file: it checks the required variables (`requiredMbFields`, line 269), the
-  candidate tag and reference-array checksum (lines 325–335) and the status
+  file: it checks the required variables (`requiredMbFields`, line 274), the
+  candidate tag and reference-array checksum (lines 330–340) and the status
   flags that follow. To use another MB2 pulse, generate a MAT file with the
   same variables and conventions, point `mbPulseMatFile` to it, and update
   the expected tag and checksum deliberately. Product-sequence RF is not
@@ -109,14 +109,15 @@ Line numbers refer to the current revision.
 | 109 | `TE1Requested` | `107e-3/7` | echo spacing [s]; 15.2857 ms is the RF-simulated value |
 | 110 | `TEeffRequested` | `107e-3` | snapped to the nearest echo |
 | 111 | `allowUnvalidatedEchoSpacing` | `true` | permits an ESP outside the RF simulation (timing checks only) |
-| 130 | `TRRequested` | `15000e-3` | raised to the minimum when infeasible |
-| 171 | `Ry` | `1` | in-plane acceleration (1–4) |
-| 176 | `isUseCaipi` | `true` | balanced slice-axis CAIPI blips |
-| 177 | `caipiShiftFractionFullFOV` | `0.5` | 1/2, 1/4, 1/6, 1/8 for Ry 1–4 |
-| 182 | `isUseWave_sin` | `false` | y (PE) sine Wave |
-| 183 | `isUseWave_cos` | `false` | z (slice) cosine Wave |
-| 184 | `gwave_max` | `10` | Wave amplitude [mT/m]; slew-limited at 140 T/m/s |
-| 186 | `Ncycles` | `20` | 10 or 20 Wave cycles per readout |
+| 116 | `minimumEchoSpacing` | `14.89e-3` | shortest accepted echo spacing [s]; see [Echo spacing](#echo-spacing) |
+| 135 | `TRRequested` | `15000e-3` | raised to the minimum when infeasible |
+| 176 | `Ry` | `1` | in-plane acceleration (1–4) |
+| 181 | `isUseCaipi` | `true` | balanced slice-axis CAIPI blips |
+| 182 | `caipiShiftFractionFullFOV` | `0.5` | 1/2, 1/4, 1/6, 1/8 for Ry 1–4 |
+| 187 | `isUseWave_sin` | `false` | y (PE) sine Wave |
+| 188 | `isUseWave_cos` | `false` | z (slice) cosine Wave |
+| 189 | `gwave_max` | `10` | Wave amplitude [mT/m]; slew-limited at 140 T/m/s |
+| 191 | `Ncycles` | `20` | 10 or 20 Wave cycles per readout |
 
 ### `seq/tse_2d_wave_mb1.m`
 
@@ -128,10 +129,11 @@ Line numbers refer to the current revision.
 | 70 | `sys_type` | `'skyra'` | |
 | 76 | `rfDesign` | `'conventional_sinc'` | see RF pulses |
 | 80–82 | `ETL`, `TE1Requested`, `TEeffRequested` | `17`, `107e-3/7`, `107e-3` | |
-| 109 | `TRRequested` | `8000e-3` | raised to the minimum when infeasible |
-| 162 | `Ry` | `1` | |
-| 169 | `Ncycles` | `20` | |
-| 170 | `isUseWave_sin` | `false` | MB1 supports the y-sine Wave only |
+| 86 | `minimumEchoSpacing` | `14.89e-3` | same floor as the MB2 generator |
+| 116 | `TRRequested` | `8000e-3` | raised to the minimum when infeasible |
+| 169 | `Ry` | `1` | |
+| 176 | `Ncycles` | `20` | |
+| 177 | `isUseWave_sin` | `false` | MB1 supports the y-sine Wave only |
 
 ### `seq/gre_mixed_dim_mb2_calibration.m`
 
@@ -149,6 +151,23 @@ Line numbers refer to the current revision.
 The calibration readout, ADC, y-sine, z-cosine and bridge timing reproduce
 `tse_2d_wave_mb2v_v3.m`. Use a calibration exported with the same `Ncycles`
 and Wave amplitude as the Wave TSE it calibrates.
+
+### Echo spacing
+
+Both TSE generators accept an echo spacing `TE1Requested` only at or above
+`minimumEchoSpacing` = 14.89 ms. This floor is the shortest spacing that the
+MB2 timing allows for every Wave mode on every supported system. Skyra with y
+and z Wave sets it: the low-PNS readout spoiler takes 1.79 ms, and a 0.37 ms
+cosine bridge sits on each side of the readout. Without Wave the MB2 timing
+alone allows 14.15 ms on Skyra, the Prisma limits allow shorter spacings, and
+the MB1 timing allows 13.52 ms. The shared floor keeps every export matchable
+across Wave modes and between MB1 and MB2.
+
+The default 15.2857 ms (`107e-3/7`, effective TE 107 ms at echo 7) is the only
+spacing included in the RF echo-train simulation of the TBW7 bundle. Other
+spacings pass the sequence timing checks only; the MB2 generator then prints
+a warning and records
+`EchoSpacingValidationMode = sequence_timing_only_not_rf_simulated`.
 
 ## System checks
 
@@ -194,18 +213,19 @@ File names encode the main parameters:
 
 ## Reproducing the reference exports
 
-The generators were imported unchanged except for their path handling, so
-regenerating with the parameters of an acquired export is expected to
-reproduce it; the comparison below tests this. Starting from the committed
-defaults, edit only the listed lines:
+The generators were imported unchanged except for their path handling and
+the echo-spacing floor, which leaves exports at the default spacing
+unchanged. Regenerating with the parameters of an acquired export is
+therefore expected to reproduce it; the comparison below tests this. Starting
+from the committed defaults, edit only the listed lines:
 
 | Reference export | Edits | System checks |
 |---|---|---|
 | MB2 `tse_m2b7v1_B15_cF2_N20_..._R1_..._TR15000_skyra` | none | off |
-| MB2 `tse_m2b7v1_B15_cF2_N20_..._R1_..._TR12000_skyra` | line 130 `TRRequested = 12000e-3;` | off |
-| MB2 `tse_m2b7v1_B15_cF2_wYZ_N20_..._R1_..._TR15000_skyra` | lines 182–183 `isUseWave_sin = true;` `isUseWave_cos = true;` | off |
-| MB2 `tse_m2b7v1_B15_cF2_wYZ_N20_..._R1_..._TR12000_skyra` | lines 182–183 as above; line 130 `TRRequested = 12000e-3;` | off |
-| MB2 `tse_m2b7v1_B15_cF4_wYZ_N20_..._R2_..._TR12000_skyra` | line 171 `Ry = 2;` line 177 `caipiShiftFractionFullFOV = 0.25;` lines 182–183 as above; line 130 `TRRequested = 12000e-3;` | off |
+| MB2 `tse_m2b7v1_B15_cF2_N20_..._R1_..._TR12000_skyra` | line 135 `TRRequested = 12000e-3;` | off |
+| MB2 `tse_m2b7v1_B15_cF2_wYZ_N20_..._R1_..._TR15000_skyra` | lines 187–188 `isUseWave_sin = true;` `isUseWave_cos = true;` | off |
+| MB2 `tse_m2b7v1_B15_cF2_wYZ_N20_..._R1_..._TR12000_skyra` | lines 187–188 as above; line 135 `TRRequested = 12000e-3;` | off |
+| MB2 `tse_m2b7v1_B15_cF4_wYZ_N20_..._R2_..._TR12000_skyra` | line 176 `Ry = 2;` line 182 `caipiShiftFractionFullFOV = 0.25;` lines 187–188 as above; line 135 `TRRequested = 12000e-3;` | off |
 | MB1 `tse_mb1_convEx2p5R3p1_Ncyc20_..._Ry1_..._TR13666_skyra` | none (TR 8 s is raised to 13.666 s) | on, skyra `.asc` |
 | Calibration `..._Nacs32_os3_prisma` | none | on, prisma `.asc` |
 | Calibration `..._Nacs32_os3_skyra` | line 59 `sys_type = 'skyra';` | on, skyra `.asc` |

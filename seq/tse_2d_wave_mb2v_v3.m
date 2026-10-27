@@ -109,6 +109,11 @@ ETL            = 17;                         % editable, supported screened pref
 TE1Requested   = 107e-3/7;                   % [s], ESP; [] uses MAT/system recommendation
 TEeffRequested = 107e-3;                     % [s], snapped to nearest echo within ETL
 allowUnvalidatedEchoSpacing = true;           % allow non-screened ESP after Pulseq timing checks
+% Shortest accepted ESP for every supported Wave mode and system. Skyra with
+% y and z Wave sets it: the low-PNS readout spoiler (1.79 ms) plus the two
+% 0.37 ms cosine bridges around each readout. The default ESP above is the
+% only spacing included in the RF echo-train simulation.
+minimumEchoSpacing = 14.89e-3;               % [s]
 turboFactor    = ETL;
 Nechoes        = 1;                          % ICE-visible echo dimension: TSE is single-echo/contrast
 necho          = ETL;                        % keep standard TSE loop variable name
@@ -386,6 +391,10 @@ else
     TE1 = TE1Requested;
     TE1SelectionMode = 'user_requested';
 end
+% Apply the shared ESP floor to requested and automatic spacings alike.
+assert(TE1 >= minimumEchoSpacing - 1e-9, ...
+    ['ESP %.6f ms is below the %.6f ms floor shared by all supported ', ...
+     'Wave modes and systems.'], TE1*1e3, minimumEchoSpacing*1e3);
 TE1RequestedResolved = TE1;
 TE1RequestWasAutomatic = isempty(TE1Requested);
 TE1Baseline = TE1; % legacy metadata alias; TE1Requested is the editable control
