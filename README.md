@@ -88,6 +88,9 @@ python -m unittest discover -s evaluation/tests
 python -m unittest discover -s recon/tests -t recon
 ```
 
+The signature check of a scanned export runs only when the environment
+variable `WAVE_TSE_REFERENCE_SEQ` names a v3 `.seq` file.
+
 ## Generate sequences
 
 | Generator | Sequence |
