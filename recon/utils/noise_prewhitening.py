@@ -94,26 +94,6 @@ def make_noise_whitener(covariance, eigenvalue_floor_relative=1e-8):
     return whitener.astype(np.complex64), eigenvalues.astype(np.float64)
 
 
-def summarize_noise_covariance(covariance):
-    """Return channel-variance, correlation, and conditioning diagnostics."""
-    covariance = np.asarray(covariance, dtype=np.complex128)
-    diagonal = np.real(np.diag(covariance))
-    if np.any(diagonal <= 0):
-        raise ValueError("Noise covariance has a nonpositive diagonal entry.")
-    correlation = covariance / np.sqrt(diagonal[:, None] * diagonal[None, :])
-    off_diagonal = np.abs(correlation - np.eye(covariance.shape[0]))
-    eigenvalues = np.linalg.eigvalsh(0.5 * (covariance + covariance.conj().T))
-    return {
-        "ncoil": int(covariance.shape[0]),
-        "variance_min": float(diagonal.min()),
-        "variance_median": float(np.median(diagonal)),
-        "variance_max": float(diagonal.max()),
-        "variance_ratio": float(diagonal.max() / diagonal.min()),
-        "condition_number": float(eigenvalues[-1] / eigenvalues[0]),
-        "maximum_absolute_offdiagonal_correlation": float(off_diagonal.max()),
-    }
-
-
 def validate_noise_whitener(covariance, whitener, atol=2e-5):
     """Validate the row-coil whitening convention and return maximum error."""
     covariance = np.asarray(covariance, dtype=np.complex128)
