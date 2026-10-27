@@ -85,5 +85,50 @@ point to invalid sensitivities or data.
 a group array and its report. Move the incomplete pair aside or use a new
 output folder.
 
+**`CSM diagnostics without maps for physical slices ...`.** An ESPIRiT run
+stopped between the diagnostics and the map of these slices. Move the listed
+`arrays/csm_diagnostics_XX.npz` files aside and rerun.
+
+**ESPIRiT takes hours on the CPU.** SigPy's CPU ESPIRiT uses one thread; use
+`--csm-workers N` (N parallel processes) or `--csm-device 0`.
+
 **GPU options.** `--device cuda` needs a CUDA-enabled PyTorch;
 `--csm-device 0` needs CuPy for SigPy. Without them, run on the CPU.
+
+### L1-wavelet regularization
+
+**`L1-wavelet regularization is implemented for MB2 scans only`.** MB1 data
+are reconstructed exactly from a complete grid; omit
+`--l1-threshold-multiple`.
+
+**`The native ... matrix does not allow ... periodized wavelet levels`.**
+Both native matrix sizes must be divisible by `2**levels`; the 440 x 220
+protocol needs `--l1-wavelet-levels 2`.
+
+**`The lambda-0 prediction holds ...% of the far-margin power`.** The Wave
+spread reaches the outer 20% of the oversampled readout, so these margins
+cannot measure the noise covariance. L1 needs more readout oversampling or a
+smaller Wave spread for this protocol.
+
+**`... too few data per unknown to estimate the noise profile` or `Only ...
+sampled PE lines lie in the outer 30% of the grid`.** The lambda-0 residual of
+the central group cannot measure the readout noise profile: the fit leaves
+less than 20% of the noise somewhere in the FOV (too few sampled lines or
+virtual coils per band unknown), or fewer than 8 outer PE lines are sampled.
+
+**`Changed noise profile`, `Partial noise profile`, `Noise-only result of
+another profile or group` or `L1 checkpoint of group ... belongs to another
+noise profile`.** The folder holds L1 results of another run. Move
+`cache/l1_noise_profile.npz`, `reports/l1_noise_profile.json`,
+`reports/l1_noise_null_group_XX.json` and the `l1c*` files of `arrays/`,
+`reports/`, `nifti/` and `figures/` aside; the lambda-0 results can stay.
+
+**`The synthetic noise solve of the noise profile did not converge` or `The
+noise-only solve of group ... did not converge`.** CG on noise data reached
+`--max-iterations`. A larger budget changes the input manifest and needs a new
+output folder.
+
+**`L1 group ... used the full budget of ... FISTA iterations` (warning).**
+The result is kept. If `fista_relative_change_last10` in the group report is
+still well above `--l1-tolerance`, rerun with a larger `--l1-max-iterations`,
+which writes a new tag.

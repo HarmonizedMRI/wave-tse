@@ -62,6 +62,23 @@ be shared by every TSE scan of that session:
 | `figures/lambda0_all_slices.png` | magnitude montage with physical aspect |
 | `logs/run_<time>.log` | progress log of each run |
 
+With `--l1-threshold-multiple` (see
+[L1-wavelet regularization](#l1-wavelet-regularization-optional-mb2)), the
+same folder also receives:
+
+| File | Content |
+|---|---|
+| `cache/l1_noise_profile.npz`, `reports/l1_noise_profile.json`, `figures/l1_noise_profile.png` | readout noise-variance profile of the scan relative to the far readout margins, its uncorrected estimate and the noise fraction left by the lambda-0 fit |
+| `reports/l1_noise_null_group_XX.json` | far-margin covariance summary, lambda-0 noise RMS, mean normal diagonal and Lipschitz constant of a group |
+| `arrays/<tag>_group_XX.npy`, `reports/<tag>_group_XX.json` | L1 group checkpoint (band, Nx, Ny) and its weights, FISTA report and digest |
+| `arrays/<tag>_complex_physical_slices.npy`, `nifti/<tag>_magnitude.nii.gz`, `nifti/<tag>_phase.nii.gz`, `figures/<tag>_all_slices.png` | L1 volume and its export |
+| `reports/<tag>_settings.json`, `reports/<tag>_nifti_geometry.json`, `reports/<tag>_completed.json` | L1 settings, geometry and final summary |
+
+`<tag>` names the L1 setting: `l1c0p5` for C = 0.5, with `_lev<n>`, `_it<n>`
+or `_tol<t>` appended for FISTA settings other than the defaults. Results of
+several settings can share one folder; they reuse the lambda-0 solution, the
+noise profile and the noise-only solves.
+
 Nothing is overwritten. A rerun with the same inputs and settings resumes from
 the saved caches and checkpoints. A folder whose input manifest records other
 inputs or settings is rejected; use a new folder instead.
@@ -120,7 +137,10 @@ positions.
   direct FLASH slices after whitening. The same basis compresses the CSM data
   and every TSE group.
 - ESPIRiT per physical slice, calibration width 24, crop 0, unit coil RSS;
-  slices are never interpolated or Fourier transformed along z.
+  slices are never interpolated or Fourier transformed along z. SigPy's CPU
+  ESPIRiT runs on one thread (about 39 min for a 920 x 920 slice);
+  `--csm-workers N` estimates N slices in parallel CPU processes, and
+  `--csm-device 0` runs it on GPU 0.
 - Wave PSF for Wave scans: wrapped-phase line fits of the y and z
   projections with noise, coherence and support gates, then sine-line models
   of `a`, `b` and `c` per readout sample. By default the coefficient processor
@@ -153,6 +173,64 @@ Fourier-z test establishes.
 Every group report records the solver information and the relative data
 residual. `--device cuda` runs the TSE solver on a GPU and `--csm-device 0`
 runs ESPIRiT on GPU 0 (needs CuPy); both default to the CPU.
+
+### L1-wavelet regularization (optional, MB2)
+
+`--l1-threshold-multiple C` adds a second solution of every MB2 group after
+lambda 0. FISTA minimizes
+
+```text
+0.5 * ||W (A x - y)||^2 + sum_b lambda_b * ||Psi x_b||_1
+```
+
+with the far-margin coil whitener `W` of the group (below), the MB2 Wave
+operator `A`, and an orthonormal periodized db4 wavelet transform `Psi` with 3
+levels (`--l1-wavelet-levels`) applied to each band image separately on the
+native readout rows; the coarsest approximation band is not penalized. FISTA
+starts from the lambda-0 solution with the step 1/L, where L is 1.05 times a
+30-iteration power estimate of the largest eigenvalue of the whitened normal
+operator. It stops after 300 iterations (`--l1-max-iterations`) or when the
+relative image change falls below 1e-4 (`--l1-tolerance`); a group that uses
+the full budget is kept and logged.
+
+The weight of band `b` is
+
+```text
+lambda_b = C * sigma_b * d_b
+```
+
+where, inside the region in which the FLASH calibration RSS of the band's
+slice exceeds 10% of its peak,
+
+- `sigma_b` is the RMS of the whitened lambda-0 reconstruction of noise alone,
+  drawn from the noise model below (seed 20261025 + group), and
+- `d_b` is the mean diagonal of the whitened normal operator, the sampled
+  line fraction times the mean of `sum_c |W S_c|^2`.
+
+The noise model is measured on the TSE data:
+
+- Coil covariance: per group, on the far readout margins (the outer 20% of
+  the oversampled readout at each end) of all sampled lines, which receive no
+  signal. A group stops if its lambda-0 prediction carries more than 1% of the
+  data power there, i.e. if the Wave spread reaches the margins.
+- Readout profile: the noise variance at every readout sample relative to the
+  far margins, which the receiver filter makes about twice as large inside the
+  FOV on the TerraX scans. It is estimated once per scan on the central group
+  (number of groups // 2): the whitened lambda-0 residual power of the PE lines
+  in the outer 30% of the grid, which hold noise only, divided by the residual
+  power that the same lambda-0 fit leaves of synthetic noise with the margin
+  covariance and a flat profile (seed 20261026). The division removes the noise
+  share that the fit absorbs inside the FOV; on the TerraX R2x4 scan the fit
+  leaves 66% of the noise there. At least 8 outer lines must be sampled, and
+  the fit must leave at least 20% of the noise everywhere in the FOV.
+
+C = 0.5 was chosen by visual review on the TerraX 2026-10-25 R2x4 scan
+(MB2 x Ry4, 0.24 mm, 7 T). That research reconstruction took the readout
+profile from a fully sampled 2026-10-19 scan without removing the share
+absorbed by its fit; on group 12 of the R2x4 scan the per-scan profile gives
+5% larger weights. C has not been reviewed on other protocols. The 220 PE
+lines of the published 440 x 220 protocol allow at most 2 wavelet levels
+(`--l1-wavelet-levels 2`).
 
 ### NIfTI export
 
@@ -191,6 +269,50 @@ python evaluation/compare_reconstructions.py \
 The audit stage of this command and of the Prisma MB2 R1 Wave scan reproduces
 the saved encoding tables of the research pipeline bit for bit.
 
+## Example: TerraX 2026-10-25 R2x4 L1-wavelet comparison
+
+The research result of this MB2 x Ry4 scan, including its lambda-0 and L1
+(C = 0.5) volumes, is in `20261025_terrax/tse_240um_R2x4_wave/`. The TSE file
+ends one ADC early, and the Wave PSF uses the reviewed readout interval of the
+0.24 mm calibration. Choose a new folder, then:
+
+```bash
+DATA=/path/to/20261025_terrax
+SEQ=/path/to/scan_protocols/20261019_terrax/tse_product_control_mb2_Ncyc20_0p24mm_TE77
+REF=/path/to/20261025_terrax/tse_240um_R2x4_wave
+OUT=/path/to/new/comparison/folder
+
+python recon/recon_wave_tse_from_twix_nifti.py \
+  --calibration-twix $DATA/meas_MID00150_FID74171_pulseq_gre_calib.dat \
+  --calibration-seq $SEQ/gre_mixed_dim_mb2_calib_waveYZ3dproj_csm2d_Ncyc20_920x920x80_FOV220p8_Nacs32_os3_TerraX.seq \
+  --tse-twix $DATA/meas_MID00152_FID74173_pulseq_tse_R2x4_wave.dat \
+  --tse-seq $SEQ/v151/tse_m2prodctl_B15_cF8_wYZ_N20_TRA_920x920x50_F220p8_R4_os3_E13_ES15p60_TE78_TR20000_TerraX.seq \
+  --calibration-dir $OUT/calibration \
+  --output-dir $OUT/tse_r2x4 \
+  --psf-fit-range 1155 1605 --psf-low-amplitude-c-fallback --allow-missing-final-adcs 1 \
+  --csm-workers 12 --threads 8 --l1-threshold-multiple 0.5
+
+python evaluation/compare_reconstructions.py \
+  --candidate $OUT/tse_r2x4/arrays/lambda0_complex_physical_slices.npy \
+  --reference $REF/arrays/lambda0_complex_physical_slices.npy \
+  --nifti $OUT/tse_r2x4/nifti/lambda0_magnitude.nii.gz \
+          $REF/nifti/r2x4_240um_lambda0_scanner_geometry_magnitude.nii.gz
+python evaluation/compare_reconstructions.py --rtol 0.02 \
+  --candidate $OUT/tse_r2x4/arrays/l1c0p5_complex_physical_slices.npy \
+  --reference $REF/arrays/l1c0p5_complex_physical_slices.npy \
+  --nifti $OUT/tse_r2x4/nifti/l1c0p5_magnitude.nii.gz \
+          $REF/nifti/r2x4_240um_l1c0p5_scanner_geometry_magnitude.nii.gz
+```
+
+The audit stage reproduces the saved encoding tables and Fourier-z test of the
+research pipeline bit for bit. With the research noise model (its readout
+margins and reference profile), the per-group functions of this command
+reproduce the saved noise RMS, normal diagonal and weights of group 12
+exactly, and its L1 image to a relative L2 difference of 1e-6. The lambda-0
+volume is expected to match. The L1 volume differs because the per-scan noise
+profile raises the weights by 5%: by 0.5% and 0.8% (relative L2) in the two
+bands of group 12.
+
 ## Validation status and limitations
 
 - Regression target: the Prisma 2026-10-15 MB1 conventional-sinc scan
@@ -201,4 +323,7 @@ the saved encoding tables of the research pipeline bit for bit.
   mapping uses the RF sign convention measured on the Prisma 2026-10-15
   product-control MB1 data; confirm it on the first v3 acquisition.
 - Transverse prescriptions only.
-- L1-wavelet regularization is not part of this command yet.
+- L1-wavelet regularization: the per-scan noise profile is validated on
+  synthetic data and on group 12 of the TerraX 2026-10-25 R2x4 scan; the
+  full-volume comparison above is pending. C = 0.5 has been reviewed on that
+  scan only.
