@@ -1,4 +1,9 @@
 %% Mixed-dimensional spoiled-GRE calibration for yz-Wave MB2 TSE
+% Author: Yiyun Dong
+% Affiliation: Athinoula A. Martinos Center for Biomedical Imaging
+%
+% FLASH calibration organization and path-setting workflow follow:
+% https://github.com/HarmonizedMRI/wave-mprage
 %
 % Scientific part IDs (sidecar metadata only; scanner SET is always zero):
 %   0: no-wave, 72 ky x 1 kz, 3D slab y-projection reference

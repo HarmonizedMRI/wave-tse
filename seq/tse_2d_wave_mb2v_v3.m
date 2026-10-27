@@ -1,4 +1,6 @@
 %% Create an imaging TSE sequence using the 15 uT TBW7 beta150 RF candidate
+% Author: Yiyun Dong
+% Affiliation: Athinoula A. Martinos Center for Biomedical Imaging
 %
 % This scanner-facing research source is derived from the established vMB
 % VERSE imaging TSE without modifying the historical production source. It
@@ -12,6 +14,14 @@
 % requires an explicit research-verification acknowledgement below. Scanner
 % timing, gradient, PNS/CNS, forbidden-frequency, RF power, and SAR checks
 % remain mandatory before acquisition.
+%
+% TSE implementation built based on Berkin's Wave-TSE code:
+% https://github.com/HarmonizedMRI/wave-haste/blob/main/script_wave_tse_sequence.m
+% and the Pulseq TSE example by Juergen Hennig and Maxim Zaitsev:
+% https://github.com/pulseq/pulseq/blob/master/matlab/demoSeq/writeTSE.m
+%
+% Path-setting workflow follows:
+% https://github.com/HarmonizedMRI/wave-mprage
 %
 % Design choices:
 %   - Keep the essential TSE gradient names and block structure:

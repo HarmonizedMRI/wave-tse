@@ -91,6 +91,11 @@ python evaluation/compare_sequence_exports.py \
 
 Author: Yiyun Dong, Athinoula A. Martinos Center for Biomedical Imaging.
 
+The TSE implementation is based on Berkin's Wave-TSE code in the
+HarmonizedMRI `wave-haste` repository and the Pulseq TSE example code by
+Juergen Hennig and Maxim Zaitsev. The FLASH calibration organization and
+path-setting workflow follow the Wave-MPRAGE project.
+
 ## License
 
 MIT License. See `LICENSE`. The `external/safe_pns_prediction` submodule keeps

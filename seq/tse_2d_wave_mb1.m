@@ -1,4 +1,6 @@
 %% Create a matched 50-slice MB1 TSE RF-control sequence
+% Author: Yiyun Dong
+% Affiliation: Athinoula A. Martinos Center for Biomedical Imaging
 %
 % Starting point: the standard non-MB multi-slice Pulseq TSE sequence.
 % This dedicated MB1 control keeps fifty independently acquired physical
@@ -10,6 +12,14 @@
 % acquisition geometry as the MB2 protocol.
 % The script intentionally contains no SMS groups, CAIPI, or collapsed-slice
 % metadata. It must remain separate from the production MB2 sequence.
+%
+% TSE implementation built based on Berkin's Wave-TSE code:
+% https://github.com/HarmonizedMRI/wave-haste/blob/main/script_wave_tse_sequence.m
+% and the Pulseq TSE example by Juergen Hennig and Maxim Zaitsev:
+% https://github.com/pulseq/pulseq/blob/master/matlab/demoSeq/writeTSE.m
+%
+% Path-setting workflow follows:
+% https://github.com/HarmonizedMRI/wave-mprage
 %
 % Design choices:
 %   - Keep the essential TSE gradient names and block structure:

@@ -77,20 +77,20 @@ simulated for ETL 17 at ESP 15.2857 ms. The bundle is simulation-selected; it
 is not scanner, profile or production approved, and the sequence definitions
 record these flags.
 
-- **MB2 TSE.** The generator loads the bundle at line 91 and accepts only this
-  file: it checks the required variables (`requiredMbFields`, line 274), the
-  candidate tag and reference-array checksum (lines 330–340) and the status
+- **MB2 TSE.** The generator loads the bundle at line 101 and accepts only this
+  file: it checks the required variables (`requiredMbFields`, line 284), the
+  candidate tag and reference-array checksum (lines 340–350) and the status
   flags that follow. To use another MB2 pulse, generate a MAT file with the
   same variables and conventions, point `mbPulseMatFile` to it, and update
   the expected tag and checksum deliberately. Product-sequence RF is not
   distributed.
-- **MB1 TSE.** The default `rfDesign = 'conventional_sinc'` (line 76) builds
+- **MB1 TSE.** The default `rfDesign = 'conventional_sinc'` (line 86) builds
   2.5 ms excitation and 3.1 ms refocusing sinc pulses with Pulseq and needs no
   file. The alternative `rfDesign = 'sigpy_9ms'` needs a single-band template
   MAT that is not distributed.
 - **Calibration.** The FLASH pulses are Pulseq sinc pulses. The calibration
-  reads slice positions and SMS grouping from the same TBW7 bundle (line 37)
-  and checks its tag and checksum (lines 201–205), so CSM slices and TSE
+  reads slice positions and SMS grouping from the same TBW7 bundle (line 42)
+  and checks its tag and checksum (lines 206–210), so CSM slices and TSE
   slices share one authoritative geometry.
 
 ## Main parameters
@@ -101,52 +101,52 @@ Line numbers refer to the current revision.
 
 | Line | Parameter | Default | Notes |
 |---:|---|---|---|
-| 99 | `write_v141_format` | `false` | also write v1.4.1 |
-| 100 | `writeSequence` | `true` | `false` runs all checks without writing |
-| 102 | `execute_system_check_code` | `false` | PNS/CNS and forbidden-frequency checks |
-| 104 | `sys_type` | `'skyra'` | `'prisma'`, `'skyra'`, `'TerraX'`, ... (hardware limits and the expected `.asc`) |
-| 108 | `ETL` | `17` | screened prefix 8–17 |
-| 109 | `TE1Requested` | `107e-3/7` | echo spacing [s]; 15.2857 ms is the RF-simulated value |
-| 110 | `TEeffRequested` | `107e-3` | snapped to the nearest echo |
-| 111 | `allowUnvalidatedEchoSpacing` | `true` | permits an ESP outside the RF simulation (timing checks only) |
-| 116 | `minimumEchoSpacing` | `14.89e-3` | shortest accepted echo spacing [s]; see [Echo spacing](#echo-spacing) |
-| 135 | `TRRequested` | `15000e-3` | raised to the minimum when infeasible |
-| 176 | `Ry` | `1` | in-plane acceleration (1–4) |
-| 181 | `isUseCaipi` | `true` | balanced slice-axis CAIPI blips |
-| 182 | `caipiShiftFractionFullFOV` | `0.5` | 1/2, 1/4, 1/6, 1/8 for Ry 1–4 |
-| 187 | `isUseWave_sin` | `false` | y (PE) sine Wave |
-| 188 | `isUseWave_cos` | `false` | z (slice) cosine Wave |
-| 189 | `gwave_max` | `10` | Wave amplitude [mT/m]; slew-limited at 140 T/m/s |
-| 191 | `Ncycles` | `20` | 10 or 20 Wave cycles per readout |
+| 109 | `write_v141_format` | `false` | also write v1.4.1 |
+| 110 | `writeSequence` | `true` | `false` runs all checks without writing |
+| 112 | `execute_system_check_code` | `false` | PNS/CNS and forbidden-frequency checks |
+| 114 | `sys_type` | `'skyra'` | `'prisma'`, `'skyra'`, `'TerraX'`, ... (hardware limits and the expected `.asc`) |
+| 118 | `ETL` | `17` | screened prefix 8–17 |
+| 119 | `TE1Requested` | `107e-3/7` | echo spacing [s]; 15.2857 ms is the RF-simulated value |
+| 120 | `TEeffRequested` | `107e-3` | snapped to the nearest echo |
+| 121 | `allowUnvalidatedEchoSpacing` | `true` | permits an ESP outside the RF simulation (timing checks only) |
+| 126 | `minimumEchoSpacing` | `14.89e-3` | shortest accepted echo spacing [s]; see [Echo spacing](#echo-spacing) |
+| 145 | `TRRequested` | `15000e-3` | raised to the minimum when infeasible |
+| 186 | `Ry` | `1` | in-plane acceleration (1–4) |
+| 191 | `isUseCaipi` | `true` | balanced slice-axis CAIPI blips |
+| 192 | `caipiShiftFractionFullFOV` | `0.5` | 1/2, 1/4, 1/6, 1/8 for Ry 1–4 |
+| 197 | `isUseWave_sin` | `false` | y (PE) sine Wave |
+| 198 | `isUseWave_cos` | `false` | z (slice) cosine Wave |
+| 199 | `gwave_max` | `10` | Wave amplitude [mT/m]; slew-limited at 140 T/m/s |
+| 201 | `Ncycles` | `20` | 10 or 20 Wave cycles per readout |
 
 ### `seq/tse_2d_wave_mb1.m`
 
 | Line | Parameter | Default | Notes |
 |---:|---|---|---|
-| 67 | `write_v141_format` | `false` | |
-| 68 | `writeSequence` | `true` | |
-| 69 | `execute_system_check_code` | `1` | |
-| 70 | `sys_type` | `'skyra'` | |
-| 76 | `rfDesign` | `'conventional_sinc'` | see RF pulses |
-| 80–82 | `ETL`, `TE1Requested`, `TEeffRequested` | `17`, `107e-3/7`, `107e-3` | |
-| 86 | `minimumEchoSpacing` | `14.89e-3` | same floor as the MB2 generator |
-| 116 | `TRRequested` | `8000e-3` | raised to the minimum when infeasible |
-| 169 | `Ry` | `1` | |
-| 176 | `Ncycles` | `20` | |
-| 177 | `isUseWave_sin` | `false` | MB1 supports the y-sine Wave only |
+| 77 | `write_v141_format` | `false` | |
+| 78 | `writeSequence` | `true` | |
+| 79 | `execute_system_check_code` | `1` | |
+| 80 | `sys_type` | `'skyra'` | |
+| 86 | `rfDesign` | `'conventional_sinc'` | see RF pulses |
+| 90–92 | `ETL`, `TE1Requested`, `TEeffRequested` | `17`, `107e-3/7`, `107e-3` | |
+| 96 | `minimumEchoSpacing` | `14.89e-3` | same floor as the MB2 generator |
+| 126 | `TRRequested` | `8000e-3` | raised to the minimum when infeasible |
+| 179 | `Ry` | `1` | |
+| 186 | `Ncycles` | `20` | |
+| 187 | `isUseWave_sin` | `false` | MB1 supports the y-sine Wave only |
 
 ### `seq/gre_mixed_dim_mb2_calibration.m`
 
 | Line | Parameter | Default | Notes |
 |---:|---|---|---|
-| 52 | `write_v141_format` | `false` | |
-| 53 | `writeSequence` | `true` | |
-| 54 | `isUseWaveCalibration` | `true` | PSF + CSM; `false` acquires the CSM only |
-| 56 | `execute_system_check_code` | `true` | PNS/CNS above 0.95 is an error |
-| 59 | `sys_type` | `'prisma'` | |
-| 62–63 | `alphaPsf`, `alphaCsm` | `7`, `20` | flip angles [deg] |
-| 80–85 | `Ncalib_y`, `Ncalib_z`, `Nacs_y` | `72`, `80`, `32` | PSF and CSM line counts |
-| 98–100 | `gwave_max`, `Ncycles` | `10`, `20` | must match the Wave TSE |
+| 57 | `write_v141_format` | `false` | |
+| 58 | `writeSequence` | `true` | |
+| 59 | `isUseWaveCalibration` | `true` | PSF + CSM; `false` acquires the CSM only |
+| 61 | `execute_system_check_code` | `true` | PNS/CNS above 0.95 is an error |
+| 64 | `sys_type` | `'prisma'` | |
+| 67–68 | `alphaPsf`, `alphaCsm` | `7`, `20` | flip angles [deg] |
+| 85–90 | `Ncalib_y`, `Ncalib_z`, `Nacs_y` | `72`, `80`, `32` | PSF and CSM line counts |
+| 103–105 | `gwave_max`, `Ncycles` | `10`, `20` | must match the Wave TSE |
 
 The calibration readout, ADC, y-sine, z-cosine and bridge timing reproduce
 `tse_2d_wave_mb2v_v3.m`. Use a calibration exported with the same `Ncycles`
@@ -222,13 +222,13 @@ from the committed defaults, edit only the listed lines:
 | Reference export | Edits | System checks |
 |---|---|---|
 | MB2 `tse_m2b7v1_B15_cF2_N20_..._R1_..._TR15000_skyra` | none | off |
-| MB2 `tse_m2b7v1_B15_cF2_N20_..._R1_..._TR12000_skyra` | line 135 `TRRequested = 12000e-3;` | off |
-| MB2 `tse_m2b7v1_B15_cF2_wYZ_N20_..._R1_..._TR15000_skyra` | lines 187–188 `isUseWave_sin = true;` `isUseWave_cos = true;` | off |
-| MB2 `tse_m2b7v1_B15_cF2_wYZ_N20_..._R1_..._TR12000_skyra` | lines 187–188 as above; line 135 `TRRequested = 12000e-3;` | off |
-| MB2 `tse_m2b7v1_B15_cF4_wYZ_N20_..._R2_..._TR12000_skyra` | line 176 `Ry = 2;` line 182 `caipiShiftFractionFullFOV = 0.25;` lines 187–188 as above; line 135 `TRRequested = 12000e-3;` | off |
+| MB2 `tse_m2b7v1_B15_cF2_N20_..._R1_..._TR12000_skyra` | line 145 `TRRequested = 12000e-3;` | off |
+| MB2 `tse_m2b7v1_B15_cF2_wYZ_N20_..._R1_..._TR15000_skyra` | lines 197–198 `isUseWave_sin = true;` `isUseWave_cos = true;` | off |
+| MB2 `tse_m2b7v1_B15_cF2_wYZ_N20_..._R1_..._TR12000_skyra` | lines 197–198 as above; line 145 `TRRequested = 12000e-3;` | off |
+| MB2 `tse_m2b7v1_B15_cF4_wYZ_N20_..._R2_..._TR12000_skyra` | line 186 `Ry = 2;` line 192 `caipiShiftFractionFullFOV = 0.25;` lines 197–198 as above; line 145 `TRRequested = 12000e-3;` | off |
 | MB1 `tse_mb1_convEx2p5R3p1_Ncyc20_..._Ry1_..._TR13666_skyra` | none (TR 8 s is raised to 13.666 s) | on, skyra `.asc` |
 | Calibration `..._Nacs32_os3_prisma` | none | on, prisma `.asc` |
-| Calibration `..._Nacs32_os3_skyra` | line 59 `sys_type = 'skyra';` | on, skyra `.asc` |
+| Calibration `..._Nacs32_os3_skyra` | line 64 `sys_type = 'skyra';` | on, skyra `.asc` |
 
 Then compare each export folder with the reference folder that holds the
 same file names:
