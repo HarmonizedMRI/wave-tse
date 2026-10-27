@@ -25,7 +25,9 @@ environment. The repository is not an installable Python package.
 ├── requirements.txt
 ├── docs/
 │   ├── sequence.md
-│   └── calibration_storage.md
+│   ├── calibration_storage.md
+│   ├── reconstruction.md
+│   └── troubleshooting.md
 ├── seq/
 │   ├── tse_2d_wave_mb2v_v3.m
 │   ├── tse_2d_wave_mb1.m
@@ -33,15 +35,17 @@ environment. The repository is not an installable Python package.
 │   ├── rf_pulses/
 │   │   └── mb2_tse_ls_tbw7_beta150_v1verse_B1max15p000uT.mat
 │   └── utils/
+├── recon/
+│   ├── recon_wave_tse_from_twix_nifti.py
+│   ├── utils/
+│   └── tests/
 ├── evaluation/
 │   ├── compare_sequence_exports.py
+│   ├── compare_reconstructions.py
 │   └── tests/
 └── external/
     └── safe_pns_prediction/   (submodule)
 ```
-
-The reconstruction (`recon/`) is being assembled from the validated research
-pipeline and will be documented in `docs/reconstruction.md`.
 
 ## Clone
 
@@ -81,6 +85,7 @@ Run the tests from the repository root:
 
 ```bash
 python -m unittest discover -s evaluation/tests
+python -m unittest discover -s recon/tests -t recon
 ```
 
 ## Generate sequences
@@ -116,10 +121,39 @@ python evaluation/compare_sequence_exports.py \
   --reference-dir /path/to/reference/protocol_folder
 ```
 
+## Reconstruct
+
+`recon/recon_wave_tse_from_twix_nifti.py` reconstructs one MB1 or MB2 TSE scan
+with the calibration acquired in the same session:
+
+```bash
+python recon/recon_wave_tse_from_twix_nifti.py \
+  --calibration-twix /path/to/meas_..._pulseq_calib.dat \
+  --calibration-seq /path/to/gre_mixed_dim_mb2_calib_....seq \
+  --tse-twix /path/to/meas_..._pulseq_tse_....dat \
+  --tse-seq /path/to/v151/tse_....seq \
+  --calibration-dir /path/to/output/calibration \
+  --output-dir /path/to/output/tse_scan
+```
+
+The sidecars are found next to their `.seq` files. The command validates the
+headers, sequences, sidecars, ADC chronology, slice mapping and trajectories
+before it computes the shared calibration (noise whitening, coil compression,
+slice-wise ESPIRiT maps, Wave PSF) and the reconstruction: the exact
+least-squares solution for complete no-Wave MB1 data, lambda-0 CG-SENSE for
+MB2 data. It writes magnitude and phase NIfTI in scanner geometry. Output
+files are never overwritten; reruns resume from the saved checkpoints. See
+[Reconstruction](docs/reconstruction.md).
+
+`evaluation/compare_reconstructions.py` compares a reconstruction with a
+reference result, for example for a regression after a software update.
+
 ## Documentation
 
 - [Sequence generation](docs/sequence.md)
 - [Calibration storage](docs/calibration_storage.md)
+- [Reconstruction](docs/reconstruction.md)
+- [Troubleshooting](docs/troubleshooting.md)
 
 ## Attribution
 
