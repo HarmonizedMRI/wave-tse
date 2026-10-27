@@ -12,8 +12,8 @@ The repository has two intentionally separate parts:
 - Python reconstructs TSE data from the calibration TWIX, the TSE TWIX, and
   the matching `.seq` files and sidecars.
 
-`pyproject.toml` defines only the Python environment. The repository is not an
-installable Python package.
+`environment.yml` (conda) and `requirements.txt` (venv) define the Python
+environment. The repository is not an installable Python package.
 
 ## Repository layout
 
@@ -21,7 +21,8 @@ installable Python package.
 .
 ├── README.md
 ├── LICENSE
-├── pyproject.toml
+├── environment.yml
+├── requirements.txt
 ├── docs/
 │   ├── sequence.md
 │   └── calibration_storage.md
@@ -47,6 +48,39 @@ pipeline and will be documented in `docs/reconstruction.md`.
 ```bash
 git clone --recurse-submodules git@github.com:HarmonizedMRI/wave-tse.git
 cd wave-tse
+```
+
+## Python environment
+
+The Python tools need the packages in `requirements.txt`. Both routes below
+install the same list. The code was tested with Python 3.12, NumPy 2.4,
+SciPy 1.17, PyTorch 2.13, SigPy 0.1.27, pyMapVBVD 0.6.1 and PyPulseq 1.5.0.
+
+With conda:
+
+```bash
+conda env create -f environment.yml
+conda activate wave-tse
+```
+
+With a Python virtual environment:
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+Everything runs on the CPU by default. For GPU computation, PyTorch needs a
+CUDA-enabled build; the Linux wheels from PyPI include one. GPU ESPIRiT
+through SigPy also needs the CuPy wheel that matches the CUDA driver, for
+example `python -m pip install cupy-cuda12x` or `cupy-cuda13x`.
+
+Run the tests from the repository root:
+
+```bash
+python -m unittest discover -s evaluation/tests
 ```
 
 ## Generate sequences

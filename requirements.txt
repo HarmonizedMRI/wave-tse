@@ -1,0 +1,13 @@
+# Python packages for the wave-tse reconstruction and evaluation tools.
+# Install into a venv with `python -m pip install -r requirements.txt`;
+# environment.yml installs the same list into a conda environment.
+# The GPU option (CuPy) is described in README.md.
+matplotlib>=3.8
+nibabel>=5.2
+numpy>=1.26,<3
+pymapvbvd>=0.6.1
+pypulseq>=1.4.2
+PyWavelets>=1.4
+scipy>=1.11
+sigpy>=0.1.27
+torch>=2.2

@@ -1,0 +1,11 @@
+# Conda environment for the wave-tse reconstruction and evaluation tools.
+# Create it with `conda env create -f environment.yml`. The Python packages
+# come from requirements.txt so that the conda and venv routes stay identical.
+name: wave-tse
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - -r requirements.txt
