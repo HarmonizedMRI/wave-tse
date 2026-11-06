@@ -12,23 +12,40 @@ function ascName = requireSystemCheckInputs(sys_type, expectedAscName, system_as
 %   safe_pns_prediction_path  safe_pns_prediction_path path setting.
 %
 % Output:
-%   ascName                   system_asc_file, validated for sys_type.
+%   ascName                   Gradient model of sys_type: system_asc_file,
+%                             or expectedAscName in the folder of
+%                             system_asc_file when the saved file belongs to
+%                             another system.
+%
+% Side effects:
+%   Prints a note when it substitutes the model of the selected system.
 %
 % Errors:
-%   Raises an error when system_asc_file is missing, when its file name
-%   differs from expectedAscName (PNS/CNS would then be evaluated with
-%   another scanner's gradient model), or when safe_pns_prediction_path is
-%   empty, because seq.calcPNS calls safe_gwf_to_pns and safe_plot.
+%   Raises an error when system_asc_file is missing, when it names another
+%   system's model and expectedAscName is not in its folder (PNS/CNS would
+%   otherwise be evaluated with another scanner's gradient model), or when
+%   safe_pns_prediction_path is empty, because seq.calcPNS calls
+%   safe_gwf_to_pns and safe_plot.
 
     if isempty(system_asc_file) || ~isfile(system_asc_file)
         error(['System checks for sys_type=%s need system_asc_file (%s). ', ...
                'Rerun the generator and set it in the path settings.'], ...
             sys_type, expectedAscName);
     end
-    [~, ascBase, ascExt] = fileparts(system_asc_file);
+    [ascFolder, ascBase, ascExt] = fileparts(system_asc_file);
     if ~strcmp([ascBase ascExt], expectedAscName)
-        error('system_asc_file %s does not match sys_type=%s, which expects %s.', ...
-            system_asc_file, sys_type, expectedAscName);
+        % The system is selected on every run, but one .asc file is saved;
+        % use the model of the selected system from the same folder.
+        candidate = fullfile(ascFolder, expectedAscName);
+        if ~isfile(candidate)
+            error(['system_asc_file %s does not match sys_type=%s, which expects %s, ', ...
+                   'and that file is not in the same folder. Select the system of the ', ...
+                   'saved file at the prompt, or set system_asc_file to %s in the path settings.'], ...
+                system_asc_file, sys_type, expectedAscName, expectedAscName);
+        end
+        fprintf('system_asc_file %s belongs to another system; using %s for sys_type=%s.\n', ...
+            system_asc_file, candidate, sys_type);
+        system_asc_file = candidate;
     end
     if isempty(safe_pns_prediction_path)
         error(['System checks need safe_pns_prediction_path for seq.calcPNS, ', ...

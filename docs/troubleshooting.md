@@ -10,10 +10,16 @@ shared echo-spacing floor of the TSE generators; see
 echo spacing other than 15.2857 ms passes the sequence timing checks only.
 
 **A system check stops generation.** With `execute_system_check_code` true,
-`system_asc_file` must name the gradient model of the selected `sys_type` and
-`safe_pns_prediction_path` must point to the
-`external/safe_pns_prediction` submodule. Run
+the gradient model of the selected `sys_type` must be the saved
+`system_asc_file` or lie in its folder, and `safe_pns_prediction_path` must
+point to the `external/safe_pns_prediction` submodule. Run
 `git submodule update --init external/safe_pns_prediction` after cloning.
+
+**`system_asc_file ... does not match sys_type=...`.** The saved `.asc` file
+is the model of another scanner, and the model of the system selected at the
+prompt is not in the same folder. Select the system the saved file belongs
+to, or copy the expected `.asc` file into that folder (or choose it in the
+path settings).
 
 **The calibration refuses to write.** It never overwrites an export; choose a
 new `out_path`.

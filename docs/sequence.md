@@ -260,11 +260,14 @@ a warning and records
 
 With `execute_system_check_code` true, the generators run `seq.calcPNS`
 (PNS, and CNS on CimaX) and `forbiddenFreqCheck` on the gradient model given by
-`system_asc_file`. The file name must match the generator's `sys_type` table,
-for example `MP_GPA_K2309_2250V_951A_AS82.asc` for `prisma` and
-`MP_GPA_K2309_2250V_793A_GC99.asc` for `skyra`, and
-`safe_pns_prediction_path` must be set; otherwise generation stops with an
-error rather than skipping the checks. The TSE generators warn above
+`system_asc_file`. The model must be the one the generator's `sys_type`
+table names, for example `MP_GPA_K2309_2250V_951A_AS82.asc` for `prisma` and
+`MP_GPA_K2309_2250V_793A_GC99.asc` for `skyra`. When the saved file belongs
+to another system, the generator uses the model of the selected system from
+the same folder and prints a note; keep the `.asc` files of all your systems
+in one folder. `safe_pns_prediction_path` must be set. Without the matching
+model or the submodule, generation stops with an error rather than skipping
+the checks. The TSE generators warn above
 PNS/CNS 0.95, the calibration stops. Forbidden-frequency results are
 warnings. The TSE definitions record `ExecuteSystemCheckCode`.
 
