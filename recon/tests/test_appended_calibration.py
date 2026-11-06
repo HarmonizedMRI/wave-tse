@@ -17,6 +17,7 @@ import recon_wave_tse_from_twix_nifti as cli
 from utils import appended_calibration as appended
 from utils import wave_psf_coefficient_processing as processing
 from utils.mb2_cg_sense_wave import mb2_wave_forward
+from utils.wave_cg_sense_precondition import fftc_dim
 
 
 def center_block(n, width):
@@ -67,13 +68,18 @@ def appended_sidecar(ny=24, nx=8, ro_os=3, nacs=(12, 12), grid_nz=20, spacing=.0
     return {"isAppendCalibration": 1, "calibration": calibration, "SMSFactor": 1}
 
 
-def fake_refscan(lin):
-    """Return a metadata-only refscan stream with zero storage counters."""
+def fake_refscan(lin, sli=23):
+    """Return a metadata-only refscan stream with zero counters on slice counter ``sli``."""
     lin = np.asarray(lin, dtype=float)
-    stream = SimpleNamespace(Lin=lin, NAcq=len(lin), NCol=24, NCha=2)
-    for name in ("Par", "Sli", "Set", "Eco", "Rep", "Ave", "Seg"):
+    stream = SimpleNamespace(Lin=lin, NAcq=len(lin), NCol=24, NCha=2, Sli=np.full(len(lin), float(sli)))
+    for name in ("Par", "Set", "Eco", "Rep", "Ave", "Seg"):
         setattr(stream, name, np.zeros(len(lin)))
     return stream
+
+
+def fake_scan(lin, sli=23):
+    """Return refscan and image streams; the first TSE group has scanner slice counter 23."""
+    return {"refscan": fake_refscan(lin, sli), "image": SimpleNamespace(Sli=np.array([23., 5., 23.]))}
 
 
 def scanner_kz_data(profile, z, kz):
@@ -110,16 +116,18 @@ class AppendedMetadataTests(unittest.TestCase):
             appended.load_appended_metadata({"isAppendCalibration": 0})
 
     def test_refscan_index(self):
-        """Every compact LIN maps to its refscan record; duplicates are refused."""
+        """Every compact LIN maps to its record; duplicates and another slice counter are refused."""
         meta = appended.load_appended_metadata(appended_sidecar())
         count = meta["expectedAdcCount"]
         order = np.random.default_rng(0).permutation(count)
-        names, local = appended.index_appended_stream({"refscan": fake_refscan(order)}, meta)
+        names, local = appended.index_appended_stream(fake_scan(order), meta)
         np.testing.assert_array_equal(order[local], np.arange(count))
         self.assertTrue(np.all(names == "refscan"))
+        with self.assertRaisesRegex(ValueError, "slice counter"):
+            appended.index_appended_stream(fake_scan(order, sli=0), meta)
         order[1] = order[0]
         with self.assertRaises(ValueError):
-            appended.index_appended_stream({"refscan": fake_refscan(order)}, meta)
+            appended.index_appended_stream(fake_scan(order), meta)
 
 
 class ZConventionTests(unittest.TestCase):
@@ -365,6 +373,85 @@ class SequenceContractTests(unittest.TestCase):
             self.assertFalse(summary["passed"])
 
 
+class ProjectionFitTests(unittest.TestCase):
+    """Check that aliased outer positions can be kept out of a Wave projection fit."""
+
+    def test_coordinate_limit_removes_an_aliased_edge_row(self):
+        """A corrupted strong edge row biases the slope; the limit recovers the true slope."""
+        nkx, npos = 256, 80
+        rng = np.random.default_rng(11)
+        coordinates = (np.arange(npos) - npos // 2) * .002
+        kx = np.arange(nkx) - nkx // 2
+        slope_true = .3 * np.sin(2 * np.pi * 8 * kx / nkx)
+        # Smooth receive profiles keep the signal coherent over the positions.
+        profile = np.stack([np.exp(-((coordinates - c) / .08) ** 2) for c in (-.05, -.02, .02, .05)], axis=-1)
+        reference = np.ones((nkx, 1, 1)) * profile[None]
+        edge = np.exp(-(kx / 40.) ** 2)[:, None, None]
+        reference = (reference * edge).astype(np.complex64)
+        phase = slope_true[:, None] * (coordinates / .16)[None]
+        wave = reference * np.exp(1j * phase)[..., None]
+        # The first row aliases both FOV ends: a rapidly varying phase at full power.
+        wave[:, 0] = reference[:, 0] * np.exp(2.5j * np.sin(2 * np.pi * kx / 4.7))[:, None]
+        reference[:, 0] *= 8
+        wave[:, 0] *= 8
+        noise = [1e-3 * (rng.normal(size=wave.shape) + 1j * rng.normal(size=wave.shape)) for _ in range(2)]
+        pair = [fftc_dim(torch.as_tensor(x, dtype=torch.complex64), dim=1)
+                for x in (reference + noise[0], wave + noise[1])]
+        delta = np.zeros(nkx)
+        center = slice(nkx // 2 - 40, nkx // 2 + 40)
+        plain = cli.fit_compact_projection(pair[0], pair[1], delta, coordinates, .16)
+        limited = cli.fit_compact_projection(pair[0], pair[1], delta, coordinates, .16, .075)
+        error_plain = np.nanmax(abs(plain["slope_raw_full"].numpy() - slope_true)[center])
+        error_limited = np.nanmax(abs(limited["slope_raw_full"].numpy() - slope_true)[center])
+        self.assertLess(error_limited, .05)
+        self.assertGreater(error_plain, 3 * error_limited)
+        self.assertFalse(limited["fit_mask_full"].numpy()[:, :3].any())
+
+
+class MB1UndersampledTests(unittest.TestCase):
+    """Check the slice-reversal check and the solver of an undersampled MB1 grid."""
+
+    def test_mapping_check_uses_cg_residuals(self):
+        """On a Ry2 Wave grid the stated maps fit the data and the reversed ones do not."""
+        ncoil, nx, nx_os, ny, nslices = 6, 8, 24, 32, 6
+        rng = np.random.default_rng(9)
+        x, yy = np.mgrid[:nx, :ny]
+        meta = {"Nx": nx, "Ny": ny, "Nx_os": nx_os, "Nslices": nslices, "fov": [.22, .22], "psfFovZ": .16,
+                "slicePositions": np.linspace(-.06, .06, nslices)}
+        cal = {"delta_y": 30 * np.sin(np.linspace(0, 4 * np.pi, nx_os))}
+        fit = {"a_processed": np.zeros(nx_os), "b_processed": np.zeros(nx_os), "c_processed": np.zeros(nx_os)}
+        mask = np.zeros((nslices, ny), np.float32)
+        mask[:, ::2] = 1
+        encoding = {"mapping": np.arange(nslices), "pairs": np.arange(nslices)[:, None],
+                    "phase": np.ones((nslices, 1, ny), np.complex64), "mask": mask}
+        data = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            calibration_folders, folders = cli.output_folders(Path(tmp) / "cal"), cli.output_folders(Path(tmp) / "tse")
+            np.save(calibration_folders["cache"] / "global_coil_basis.npy", np.eye(ncoil))
+            for p in range(nslices):
+                centers = rng.uniform(0, [nx, ny], (ncoil, 2))
+                maps = np.stack([np.exp(-((x - cx) ** 2 + (yy - cy) ** 2) / 40) for cx, cy in centers]) + 0j
+                maps /= np.sqrt(np.sum(abs(maps) ** 2, axis=0))
+                np.save(calibration_folders["cache"] / f"csm_slice_{p:02d}.npy", maps.astype(np.complex64))
+                sens = np.zeros((1, ncoil, nx_os, ny), np.complex64)
+                sens[0, :, cli.native_rows(nx, nx_os)] = maps
+                image = np.zeros((1, nx_os, ny), np.complex64)
+                image[0, cli.native_rows(nx, nx_os)] = 1 + np.cos(yy / 3)
+                psf = torch.as_tensor(cli.wave_psf(np.array([p]), meta, cal, fit, ny, use_z=False))
+                data[p] = mb2_wave_forward(torch.as_tensor(image), torch.as_tensor(sens),
+                                           torch.ones((1, ny), dtype=torch.complex64), psf,
+                                           torch.as_tensor(mask[p][None, None])).numpy()
+            with mock.patch.object(cli, "load_group_data", side_effect=lambda scan, group, *a: (data[group], group)):
+                cli.verify_mb1_calibration_mapping(None, None, meta, calibration_folders, folders, encoding,
+                                                   cal, fit, {"wave": True})
+            report = json.loads((folders["reports"] / "mb1_flash_mapping_validation.json").read_text())
+            self.assertTrue(report["passed"], report)
+            self.assertIn("CG-SENSE", report["method"])
+            for result in report["slices"]:
+                self.assertLess(result["stated_mapping_residual"], .05)
+                self.assertGreater(result["reversed_mapping_residual"], 3 * result["stated_mapping_residual"])
+
+
 class AppendedCliTests(unittest.TestCase):
     """Check input resolution, the TSE/calibration ADC split and the 3D-ACS map files."""
 
@@ -381,6 +468,14 @@ class AppendedCliTests(unittest.TestCase):
             self.assertEqual(inputs["calibration_mode"], "appended")
             self.assertEqual(inputs["calibration"]["labels"], inputs["tse"]["peorder"])
             self.assertEqual(inputs["calibration"]["twix"], inputs["tse"]["twix"])
+
+    def test_slice_normal(self):
+        """Transverse and transverse-dominant oblique stacks pass; the others are refused."""
+        cli.check_slice_normal([0, 0, 1])
+        cli.check_slice_normal([0, -0.116879, 0.993146])
+        for normal in ([1, 0, 0], [0, 1, 0], [0, 0, -1], [.1, .8, .59]):
+            with self.assertRaises(ValueError):
+                cli.check_slice_normal(normal)
 
     def test_tse_adc_count(self):
         """TSE ADCs end where the stated REF calibration readouts begin."""

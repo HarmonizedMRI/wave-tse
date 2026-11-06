@@ -169,7 +169,7 @@ exceeds 1% of the PE k-space step (0.045 1/m). With `isUseCaipi = false` and
 | 101–103 | `ETL`, `TE1Requested`, `TEeffRequested` | `17`, `107e-3/7`, `107e-3` | |
 | 107 | `minimumEchoSpacing` | `14.89e-3` | same floor as the MB2 generator |
 | 137 | `TRRequested` | `8000e-3` | raised to the minimum when infeasible |
-| 190 | `Ry` | `1` | the reconstruction needs the complete grid of `Ry = 1` |
+| 190 | `Ry` | `1` | undersampled grids are reconstructed with CG-SENSE |
 | 197 | `Ncycles` | `20` | |
 | 201 | `isUseWave_sin` | `true` | y-sine Wave; `false` for a Cartesian export. MB1 has no z Wave |
 | 215 | `isAppendCalibration` | `true` | append the 3D FLASH calibration |

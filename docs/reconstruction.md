@@ -130,8 +130,9 @@ Appended calibration:
 TSE:
 
 - recorded sequence name, readout length, FOV (equal to the calibration) and a
-  transverse slice normal; receive-element identities, stack center and
-  in-plane rotation equal to the calibration;
+  transverse or transverse-dominant oblique slice normal; receive-element
+  identities, stack center, slice normal and in-plane rotation equal to the
+  calibration;
 - sidecar slice positions, thickness, in-plane FOV and SMS pairing equal to
   the calibration; Wave cycles, amplitude and polarity equal to the
   calibration for Wave scans;
@@ -145,8 +146,8 @@ TSE:
   (v3 MB2, whose RF waveforms encode the group offset) the sidecar
   `groupBySlc` mapping, accepted only when demodulating every excitation at
   its group center recovers one RF envelope and the opposite sign fails;
-- scanner MDH slice offsets equal to the mapped group centers up to one global
-  sign, which is recorded (-1 for the Prisma MB1 conventional-sinc scan, +1 for
+- scanner MDH slice offsets equal to the mapped group centers along the slice
+  normal, up to one global sign, which is recorded (-1 for the Prisma MB1 conventional-sinc scan, +1 for
   the Prisma MB2 scans of 2026-10-15);
 - sampled kx, ky and kz equal to the calibration-derived trajectory within
   0.02/m (kx, ky) and 0.01/FOV (kz, after the CAIPI blips);
@@ -178,7 +179,10 @@ positions.
 - Wave PSF for Wave scans: wrapped-phase line fits of the y and z
   projections with noise, coherence and support gates, then sine-line models
   of `a`, `b` and `c` per readout sample. For the y-sine MB1 Wave only the y
-  projections are fitted (`b = 0`, `c` the y constant; tag suffix `_y`). By default the coefficient processor
+  projections are fitted (`b = 0`, `c` the y constant; tag suffix `_y`). The
+  z fit uses only the positions inside the slice stack: an object longer than
+  the 160 mm z FOV, such as a phantom, aliases into the outer z rows with both
+  Wave phases, and those rows carry no valid phase. By default the coefficient processor
   selects an automatic stable interval, and the supported phase residual must
   not exceed 0.25 rad. When it rejects the calibration,
   `--psf-fit-range START STOP` fits a reviewed interval `[START, STOP)` of
@@ -193,14 +197,15 @@ Fourier-z test establishes.
 
 ### Reconstruction
 
-- MB1: the grid must be complete. Without Wave each slice is the exact
-  least-squares coil combination; with the y-sine Wave it is solved with
-  lambda-0 CG-SENSE through the one-band Wave operator, after the operator
-  tests below. Before the slices are solved, five fully sampled slices are
-  compared with the stated and with the slice-reversed FLASH maps (after an
-  exact Wave-PSF deconvolution for Wave data); the stated mapping must give
-  the lower residual on all five and a residual below 0.4 and below half the
-  reversed one on the second and fourth.
+- MB1: a complete no-Wave grid gives each slice as the exact least-squares
+  coil combination; with the y-sine Wave or an undersampled grid each slice is
+  solved with lambda-0 CG-SENSE through the one-band Wave operator, after the
+  operator tests below. Before the slices are solved, five slices are compared
+  with the stated and with the slice-reversed FLASH maps: on a complete grid by
+  coil-vector projection (after an exact Wave-PSF deconvolution for Wave data),
+  on an undersampled grid by the data residual of a CG solve with each map. The
+  stated mapping must give the lower residual on all five and a residual below
+  0.4 and below half the reversed one on the second and fourth.
 - MB2: lambda-0 CG-SENSE per SMS group (tolerance 1e-6, at most 800
   iterations, `--tolerance`, `--max-iterations`) with the MB2 Wave operator,
   after a real-grid adjoint test (relative error at most 1e-5) and a synthetic
@@ -399,17 +404,23 @@ residual of each solution.
   (MID89) with its calibration (MID86), compared with the saved result of
   the research pipeline as shown above. The MB2 path has passed the audit on
   the Prisma MB2 product-control scans; its full regression is pending.
-- No v3 MB2 scan has been reconstructed yet. Its waveform-encoded slice
-  mapping uses the RF sign convention measured on the Prisma 2026-10-15
-  product-control MB1 data; confirm it on the first v3 acquisition.
-- The appended 3D FLASH calibration and the MB1 Wave reconstruction are
-  tested on synthetic data only; no integrated scan has been acquired. The
-  ACS z convention is the negative Fourier-z convention that the mixed
-  calibrations established; the ACS-versus-z-projection test re-checks it on
-  every MB2 scan and the slice-reversal test on every MB1 scan. Whether the
-  Siemens Pulseq interpreter handles REF readouts in a 2D multi-slice
-  protocol without online-reconstruction errors is also open.
-- Transverse prescriptions only.
+- The v3 MB2 sequence, the appended 3D FLASH calibration and the MB1 Wave
+  reconstruction have been tested on one phantom session (2026-11-05): MB2
+  R1 to R4 and MB1 R1 and R2, each reconstructed with its appended
+  calibration and with a separate mixed calibration. The scanner accepted
+  the REF readouts of the 2D multi-slice protocol, the refscan stream held
+  every calibration readout, and the waveform-encoded slice mapping passed
+  with the RF sign convention measured on the Prisma 2026-10-15
+  product-control MB1 data. Against the mixed calibration, the data residual
+  matched within 1%, and at R > 1 CG needed fewer iterations and the
+  background noise was lower (1.57 times at MB2 R4). No in vivo scan has been
+  reconstructed with the appended calibration. The ACS z convention is the
+  negative Fourier-z convention that the mixed calibrations established; the
+  ACS-versus-z-projection test re-checks it on every MB2 scan and the
+  slice-reversal test on every MB1 scan.
+- Transverse and transverse-dominant oblique prescriptions only. The
+  reconstruction runs in the logical frame; the NIfTI affine of an oblique
+  stack follows the header normal and has not been compared with DICOM.
 - L1-wavelet regularization: the per-scan noise profile is validated on
   synthetic data and on group 12 of the TerraX 2026-10-25 R2x4 scan; the
   full-volume comparison above is pending. C = 0.5 has been reviewed on that

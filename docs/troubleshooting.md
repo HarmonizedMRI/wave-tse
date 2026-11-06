@@ -72,14 +72,15 @@ folder; their results are tagged.
 **`Recorded sequence ... differs`.** The TWIX header names another `.seq`
 file. Pass the exact sequence exported for that acquisition.
 
-**`Only transverse prescriptions are supported`.** The slice-direction and
-NIfTI conventions are validated for transverse stacks only.
+**`Only transverse or transverse-dominant oblique prescriptions are
+supported`.** The slice-direction and NIfTI conventions hold while the slice
+normal is dominated by +Tra, including tilted stacks (T>C, T>S).
 
 **`Raw ADC chronology is not the sequence order ...`.** The TWIX file and the
 sequence do not belong together, or the file ended early. When a scan was
 stopped after its last useful readouts, `--allow-missing-final-adcs N` accepts
 up to `N` missing final ADCs, provided the acquired ADCs are an exact prefix of
-the sequence order. MB1 reconstruction still needs a complete grid.
+the sequence order.
 
 **`RF/Gz physical mapping error` or `RF waveform slice translation not
 verified`.** The excitation frequencies or RF waveforms do not place the slice

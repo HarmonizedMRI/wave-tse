@@ -188,6 +188,10 @@ and one TWIX file.
 - Every calibration ADC is a REF readout with a unique zero-based LIN in
   acquisition order, 0 through N-1, and PAR = SLC = SET = ECO = 0, so the
   whole calibration arrives in the `refscan` stream. IMA stays false.
+- The scanner maps the SLC label to a slice counter sorted by position, so
+  the refscan `Sli` is the counter that SLC = 0 maps to, which need not be 0.
+  The reconstruction requires one refscan `Sli`, equal to that of the first
+  TSE readout.
 - Dummy and settling shots have no ADC.
 
 | Mode | Parts | Calibration ADCs |

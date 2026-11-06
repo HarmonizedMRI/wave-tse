@@ -109,8 +109,8 @@ def index_appended_stream(scan, meta):
 
     Raises:
         ValueError: If the refscan stream is missing, does not hold every
-            compact LIN exactly once, has nonzero storage counters or another
-            readout length.
+            compact LIN exactly once, has nonzero storage counters, leaves
+            the slice counter of SLC 0 or has another readout length.
     """
     count = int(meta["expectedAdcCount"])
     if "refscan" not in scan:
@@ -119,8 +119,12 @@ def index_appended_stream(scan, meta):
     raw_lin = np.asarray(stream.Lin, dtype=np.int64)
     if not np.array_equal(np.sort(raw_lin), np.arange(count)):
         raise ValueError("refscan LIN coverage differs from the appended calibration")
-    if any(np.any(np.asarray(getattr(stream, key)) != 0) for key in ("Par", "Sli", "Set", "Eco", "Rep", "Ave", "Seg")):
+    if any(np.any(np.asarray(getattr(stream, key)) != 0) for key in ("Par", "Set", "Eco", "Rep", "Ave", "Seg")):
         raise ValueError("refscan has unexpected nonzero storage counters")
+    # The scanner maps the SLC label to its sorted-position slice counter, so
+    # the calibration's SLC = 0 arrives as the counter of the first TSE group.
+    if np.any(np.asarray(stream.Sli) != np.asarray(scan["image"].Sli)[0]):
+        raise ValueError("refscan slice counter differs from the counter of SLC 0")
     if int(stream.NCol) != int(meta["Nx_os"]):
         raise ValueError("Calibration ADC sample count differs from the sidecar")
     names = np.full(count, "refscan", dtype="U7")

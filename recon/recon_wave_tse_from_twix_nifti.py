@@ -29,10 +29,10 @@ Description:
       recon        Group-wise reconstruction, assembled complex volume and
                    magnitude/phase NIfTI export with exact readback.
 
-    MB1 data must form a complete Cartesian grid. Without Wave each slice is
-    the exact least-squares coil combination; with the y-sine Wave it is
-    solved with lambda-0 CG-SENSE through the one-band Wave operator. MB2 data
-    are solved per SMS group with lambda-0 CG-SENSE through the MB2 Wave
+    A complete no-Wave MB1 grid gives each slice as the exact least-squares
+    coil combination; MB1 data with the y-sine Wave or an undersampled grid
+    are solved with lambda-0 CG-SENSE through the one-band Wave operator. MB2
+    data are solved per SMS group with lambda-0 CG-SENSE through the MB2 Wave
     operator. Both CG paths first pass real-grid adjoint and
     synthetic-recovery tests. With ``--l1-threshold-multiple``, MB2 groups are
     also solved with L1-wavelet FISTA, starting from lambda 0, with band
@@ -46,8 +46,9 @@ Notes:
     - A separate calibration folder can be shared by every TSE scan that
       used the same calibration acquisition. An appended calibration belongs
       to its TSE scan; its folder defaults to ``<output-dir>/calibration``.
-    - Only transverse prescriptions are supported, matching the validated
-      slice-direction and NIfTI conventions.
+    - Only transverse and transverse-dominant oblique prescriptions are
+      supported, matching the validated slice-direction and NIfTI conventions.
+      The reconstruction itself works in the logical readout/PE/slice frame.
 """
 
 import argparse
@@ -108,6 +109,9 @@ SOLVER_TAG = "lambda0"
 # with the no-Wave z projection, and its margin over the reversed z order.
 ACS_Z_MIN_CORRELATION = 0.9
 ACS_Z_MIN_MARGIN = 0.1
+# CG budget of the slice-reversal check of an undersampled MB1 grid.
+MB1_MAPPING_CG_ITERATIONS = 200
+MB1_MAPPING_CG_TOLERANCE = 1e-5
 
 # L1-wavelet FISTA and its noise model; the FISTA defaults are those of the
 # TerraX 2026-10-25 R2x4 research reconstruction.
@@ -577,6 +581,25 @@ def sequence_details(path):
     return sequence, labels, np.asarray(phases), np.asarray(carriers), np.asarray(gradients)
 
 
+def check_slice_normal(normal):
+    """Require a transverse or transverse-dominant oblique slice normal.
+
+    The stored slice and PE axis flips of the NIfTI export hold while the
+    transverse component dominates and points to +Tra; the reconstruction
+    itself is independent of the normal.
+
+    Args:
+        normal: Slice normal (dSag, dCor, dTra) of the prescription.
+
+    Raises:
+        ValueError: If the normal is sagittal, coronal or points to -Tra.
+    """
+    sag, cor, tra = (float(value) for value in normal)
+    if tra <= 0 or tra < max(abs(sag), abs(cor)):
+        raise ValueError(f"Only transverse or transverse-dominant oblique prescriptions are supported, "
+                         f"normal {list(normal)}")
+
+
 def header_contract(scan, sequence_path, meta):
     """Validate a TWIX header against its sequence and the calibration geometry.
 
@@ -592,7 +615,8 @@ def header_contract(scan, sequence_path, meta):
 
     Raises:
         ValueError: On a different recorded sequence, readout length, FOV,
-            nontransverse prescription or missing coil identities.
+            a prescription rejected by :func:`check_slice_normal` or missing
+            coil identities.
     """
     yaps = scan.hdr["MeasYaps"]
     recorded = str(yaps[("sWipMemBlock", "tFree")]).strip('"').replace("\\", "/")
@@ -606,8 +630,7 @@ def header_contract(scan, sequence_path, meta):
     normal = [float(yaps.get(prefix + ("sNormal", key), 0)) for key in ("dSag", "dCor", "dTra")]
     if not np.allclose(fov_mm, np.asarray(meta["fov"], float) * 1e3, atol=1e-3):
         raise ValueError(f"Prescribed FOV {fov_mm} mm differs from the calibration")
-    if not np.allclose(normal, [0, 0, 1], atol=1e-5):
-        raise ValueError(f"Only transverse prescriptions are supported, normal {normal}")
+    check_slice_normal(normal)
     # Insertion timestamps change between scans; every identity, order,
     # connection and selection field must match instead.
     coils = {str(k): str(v) for k, v in yaps.items()
@@ -618,7 +641,7 @@ def header_contract(scan, sequence_path, meta):
         raise ValueError("Missing receive-element identities")
     return {"center_sct_mm": np.mean(np.unique(stream.slicePos[:, :3], axis=0), axis=0).tolist(),
             "rotation_rad": float(yaps.get(prefix + ("dInPlaneRot",), 0)),
-            "coils": coils, "physical_coils": int(stream.NCha), "fov_mm": fov_mm,
+            "coils": coils, "physical_coils": int(stream.NCha), "fov_mm": fov_mm, "normal": normal,
             "frequency_hz": float(yaps[("sTXSPEC", "asNucleusInfo", "0", "lFrequency")]),
             "coil_insertion_timestamps": timestamps}
 
@@ -866,6 +889,8 @@ def audit_tse(paths, scan, meta, geometry, cal_encoding, folders, allowed_missin
         raise ValueError("Calibration and TSE stack centers differ")
     if not np.isclose(header["rotation_rad"], geometry["rotation_rad"], atol=1e-6):
         raise ValueError("Calibration and TSE in-plane rotations differ")
+    if not np.allclose(header["normal"], geometry["normal"], atol=1e-5):
+        raise ValueError("Calibration and TSE slice normals differ")
 
     pe = loadmat(paths["peorder"], simplify_cells=True)
     positions = np.asarray(meta["slicePositions"], float)
@@ -960,8 +985,8 @@ def audit_tse(paths, scan, meta, geometry, cal_encoding, folders, allowed_missin
     # carrier the scanner cannot derive the offsets; all-zero offsets are
     # then reported only.
     mdh_offsets = np.asarray(mdh_offsets)
-    expected_offsets = np.zeros_like(mdh_offsets)
-    expected_offsets[:, 2] = centers[mapping] * 1e3
+    # The offsets lie along the slice normal, which is tilted on an oblique stack.
+    expected_offsets = np.outer(centers[mapping] * 1e3, header["normal"])
     signs = [sign for sign in (1, -1)
              if np.allclose(mdh_offsets, sign * expected_offsets, atol=3e-3, rtol=0)]
     if signs:
@@ -998,7 +1023,7 @@ def audit_tse(paths, scan, meta, geometry, cal_encoding, folders, allowed_missin
     audit = {"tse_twix": str(paths["twix"]), "image_adc_acquired": acquired, "image_adc_expected": len(lin),
              "missing_final_adcs": missing_adcs, "physical_coils": header["physical_coils"],
              "center_sct_mm": header["center_sct_mm"], "rotation_rad": header["rotation_rad"],
-             "frequency_hz": header["frequency_hz"], "calibration_frequency_hz": geometry["frequency_hz"],
+             "slice_normal": header["normal"], "frequency_hz": header["frequency_hz"], "calibration_frequency_hz": geometry["frequency_hz"],
              "matrix": [nx, ny, nslices], "readout_samples": nx_os,
              "voxel_mm": [fov[0] * 1e3 / nx, fov[1] * 1e3 / ny, float(meta["sliceThickness"]) * 1e3],
              "MB": mb, "Ry": int(pe["Ry"]), "wave": is_wave, "wave_y": wave_y, "wave_z": wave_z,
@@ -1443,8 +1468,15 @@ def prepare_psf(scan, record_index, meta, cal_encoding, folders, whitener, fit_r
         pair = [torch.from_numpy(read_compact_records(scan, record_index, meta["psfAdcIndices"][row, :n])
                                  @ whitener) for row in (first, first + 1)]
         fov = float(meta["fov"][1]) if axis == "y" else float(meta["psfFovZ"])
+        # The PSF is evaluated on the slice stack only. An object longer than
+        # the z FOV aliases into the outer z rows with both Wave phases, so
+        # those rows carry no valid phase and are left out of the z fit.
+        limit = None
+        if axis == "z":
+            limit = float(np.max(abs(np.asarray(meta["slicePositions"], float)))) + \
+                float(meta["sliceThickness"]) / 2
         fitted[axis] = fit_compact_projection(pair[0], pair[1], cal_encoding[f"delta_{axis}"],
-                                              meta[f"psf{axis.upper()}Coordinates"], fov)
+                                              meta[f"psf{axis.upper()}Coordinates"], fov, limit)
         del pair
     y, z = fitted["y"], fitted.get("z")
     # Save the projection evidence before curve acceptance, including failed masks.
@@ -1556,7 +1588,7 @@ def plot_wave_fit(raw, processed, lo, hi, path):
     plt.close(fig)
 
 
-def fit_compact_projection(nowave, wave, delta_k, coordinates_m, fov_m):
+def fit_compact_projection(nowave, wave, delta_k, coordinates_m, fov_m, coordinate_limit_m=None):
     """Fit one Fourier projection with absolute noise, coherence and support gates.
 
     Inputs are (readout sample, encoded position, coil) tensors and physical
@@ -1569,6 +1601,8 @@ def fit_compact_projection(nowave, wave, delta_k, coordinates_m, fov_m):
         delta_k: Wave minus no-Wave k-space per readout sample [1/m].
         coordinates_m: Encoded positions [m].
         fov_m: Encoded FOV [m].
+        coordinate_limit_m: Largest absolute encoded position used by the
+            fit [m]; None uses every position.
 
     Returns:
         dict: Raw slope and constant coefficients, fit quality, phase
@@ -1584,9 +1618,11 @@ def fit_compact_projection(nowave, wave, delta_k, coordinates_m, fov_m):
     noise_power = float(torch.median(torch.cat((power[:edge], power[-edge:])).flatten()))
     threshold = 6 * noise_power
     valid = (power > threshold) & (wave_power > threshold) & (coherence >= 0.6)
+    coord = torch.as_tensor(coordinates_m, dtype=torch.float32)
+    if coordinate_limit_m is not None:
+        valid &= (abs(coord) <= coordinate_limit_m)[None]
     weight = torch.where(valid, power, 0)
     effective = weight.sum(1)**2 / (weight.square().sum(1)).clamp_min(1e-30)
-    coord = torch.as_tensor(coordinates_m, dtype=torch.float32)
     low = torch.where(valid, coord[None], torch.inf).min(1).values
     high = torch.where(valid, coord[None], -torch.inf).max(1).values
     span = high - low
@@ -1614,6 +1650,7 @@ def fit_compact_projection(nowave, wave, delta_k, coordinates_m, fov_m):
             "weight": power, "coherence": coherence, "effective_positions": effective,
             "report": {"edge_noise_power": noise_power, "absolute_power_threshold": threshold,
                        "coherence_threshold": 0.6, "minimum_effective_positions": 6,
+                       "coordinate_limit_m": coordinate_limit_m,
                        "minimum_physical_span_m": 0.03,
                        "accepted_kx_fraction": float((~fitted["skipped"]).float().mean()),
                        "noise_estimate": "outer 5% kx samples, both ends; not noise prewhitening"}}
@@ -1762,8 +1799,9 @@ def verify_mb1_calibration_mapping(scan, basis, meta, calibration_folders, folde
     other permutations. The stated mapping must win on all five slices and
     win clearly (residual below 0.4 and below half the reversed one) on the
     second and fourth, which lie inside the well-supported stack. With the
-    y-sine Wave, the complete grid is first deconvolved exactly with the
-    Wave PSF of each slice.
+    y-sine Wave, a complete grid is first deconvolved exactly with the Wave
+    PSF of each slice. An undersampled grid has no coil images to project, so
+    the residual is then the data residual of a CG solve with each map.
 
     Args:
         scan: Header-only TSE measurement.
@@ -1789,12 +1827,24 @@ def verify_mb1_calibration_mapping(scan, basis, meta, calibration_folders, folde
     rows = native_rows(nx, nx_os)
     slices = sorted({int(round(v)) for v in np.linspace(0, nslices - 1, 5)})
     results = []
+    is_wave = audit is not None and audit["wave"]
+    complete = bool(np.all(encoding["mask"] == 1)) if "mask" in encoding else True
     for sli in slices:
         group = int(encoding["mapping"][sli])
         physical = int(encoding["pairs"][group][0])
         data, _ = load_group_data(scan, group, basis, encoding, nx_os, ny)
+        if not complete:
+            psf = np.ones((1, nx_os, ny), np.complex64)
+            if is_wave:
+                psf = wave_psf(np.array([physical]), meta, cal_encoding, psf_fit, ny, use_z=False)
+            scores = [mb1_cg_mapping_residual(torch.from_numpy(data), candidate, encoding, group, psf,
+                                              calibration_folders, nx_os)
+                      for candidate in (physical, nslices - 1 - physical)]
+            results.append({"raw_sli": sli, "physical_index": physical, "stated_mapping_residual": scores[0],
+                            "reversed_mapping_residual": scores[1]})
+            continue
         data = torch.from_numpy(data) * torch.from_numpy(encoding["phase"][group, 0].conj())[None, None]
-        if audit is not None and audit["wave"]:
+        if is_wave:
             psf = wave_psf(np.array([physical]), meta, cal_encoding, psf_fit, ny, use_z=False)[0]
             coils = ifftc_dim(ifftc_dim(data, 2) * torch.from_numpy(psf).conj()[None], 1)[:, rows]
         else:
@@ -1810,14 +1860,41 @@ def verify_mb1_calibration_mapping(scan, basis, meta, calibration_folders, folde
     for r in results[1:4:2]:
         passed &= r["stated_mapping_residual"] < .4 and \
             r["stated_mapping_residual"] < .5 * r["reversed_mapping_residual"]
+    method = "Full-grid native-FOV coil-vector projection onto fixed FLASH CSMs" + \
+        (" after exact Wave-PSF deconvolution" if is_wave else "")
+    if not complete:
+        method = "Data residual of a one-band CG-SENSE solve of the undersampled grid with each fixed FLASH CSM"
     report = {"passed": bool(passed), "raw_sli_to_physical": encoding["mapping"].tolist(), "slices": results,
-              "method": "Full-grid native-FOV coil-vector projection onto fixed FLASH CSMs" +
-                        (" after exact Wave-PSF deconvolution" if audit is not None and audit["wave"] else ""),
+              "method": method,
               "limitations": "Global reversal check; not an independent absolute scanner profile validation",
               "basis_sha256": digest(calibration_folders["cache"] / "global_coil_basis.npy")}
     save_json(path, report)
     if not passed:
         raise ValueError(f"MB1/FLASH physical mapping not established: {results}")
+
+
+def mb1_cg_mapping_residual(data, candidate, encoding, group, psf, calibration_folders, nx_os):
+    """Return the relative data residual of one undersampled MB1 slice with the maps of a candidate slice.
+
+    Args:
+        data: Measured k-space (virtual coil, Nx_os, Ny), zero on unsampled lines.
+        candidate: Zero-based physical slice whose maps encode the solve.
+        encoding: ``audit_tse`` encoding arrays.
+        group: Zero-based slice group of ``data``.
+        psf: Wave PSF of the slice (1, Nx_os, Ny); ones without Wave.
+        calibration_folders: Calibration output folders (CSM cache).
+        nx_os: Oversampled readout size.
+
+    Returns:
+        float: ``||A x - d|| / ||d||`` over the sampled lines.
+    """
+    sens = group_sensitivities([candidate], calibration_folders, nx_os)
+    phase = torch.from_numpy(encoding["phase"][group])
+    mask = torch.from_numpy(encoding["mask"][group][None, None])
+    wave = torch.from_numpy(psf)
+    image = cg_sense_mb2_wave_2d(data, sens, phase, wave, mask, n_iter=MB1_MAPPING_CG_ITERATIONS,
+                                 tol=MB1_MAPPING_CG_TOLERANCE, lambda_l2=0, verbose=False)
+    return relative_norm(mb2_wave_forward(image, sens, phase, wave, mask) - data * mask, data * mask)
 
 
 def operator_tests(sens, phase, psf, mask, folders, max_iterations, tolerance):
@@ -1859,10 +1936,10 @@ def reconstruct_groups(scan, meta, basis, calibration_folders, folders, encoding
                        psf_fit, audit, args):
     """Reconstruct every slice group, saving checkpoints, and assemble the volume.
 
-    MB1 groups without Wave use :func:`mb1_least_squares`; MB2 groups and
-    MB1 groups with the y-sine Wave use lambda-0 CG-SENSE with the Wave PSF
-    (or a unit PSF without Wave). Existing group checkpoints are reused after
-    their digest and physical indices match.
+    Complete no-Wave MB1 groups use :func:`mb1_least_squares`; MB2 groups and
+    MB1 groups with the y-sine Wave or an undersampled grid use lambda-0
+    CG-SENSE with the Wave PSF (or a unit PSF without Wave). Existing group
+    checkpoints are reused after their digest and physical indices match.
 
     Args:
         scan: Header-only TSE measurement.
@@ -1906,14 +1983,13 @@ def reconstruct_groups(scan, meta, basis, calibration_folders, folders, encoding
             terms = group_terms(scan, group, meta, basis, calibration_folders, encoding, cal_encoding,
                                 psf_fit, audit, device)
             data, sens, phase, psf, mask = (terms[key] for key in ("data", "sens", "phase", "psf", "mask"))
-            if audit["MB"] == 1 and not np.all(encoding["mask"][group] == 1):
-                raise ValueError("MB1 reconstruction needs a complete Cartesian grid")
-            if audit["MB"] == 1 and not audit["wave"]:
+            if audit["MB"] == 1 and not audit["wave"] and np.all(encoding["mask"][group] == 1):
                 result, prediction = mb1_least_squares(data, sens, phase)
                 info = {"method": "exact least-squares coil combination of a complete grid",
                         "converged": True}
             else:
-                # MB2, and MB1 with the y-sine Wave as a one-band problem.
+                # MB2, and MB1 with the y-sine Wave or an undersampled grid as a
+                # one-band problem.
                 operator_tests(sens, phase, psf, mask, folders, args.max_iterations, args.tolerance)
                 result, info = cg_sense_mb2_wave_2d(data, sens, phase, psf, mask, n_iter=args.max_iterations,
                                                     tol=args.tolerance, lambda_l2=0, verbose=False,
