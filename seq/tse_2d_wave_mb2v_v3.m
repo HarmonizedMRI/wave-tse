@@ -113,7 +113,7 @@ mbPulseMatFile = fullfile(script_dir, 'rf_pulses', ...
 write_v141_format = false;
 writeSequence = true; % candidate remains validation-only until RF/timing review is complete
 allowUnapprovedCandidateForResearchScan = true; % acknowledge only for the planned research scan
-execute_system_check_code = false; % set true to run PNS/CNS and forbidden-frequency checks
+execute_system_check_code = true; % PNS/CNS and forbidden-frequency checks; false skips them
 
 % Scanner system, asked in the Command Window on every run; Enter keeps
 % sysTypeDefault. It selects the hardware limits below, the gradient model

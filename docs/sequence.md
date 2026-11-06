@@ -127,7 +127,7 @@ Line numbers refer to the current revision.
 |---:|---|---|---|
 | 113 | `write_v141_format` | `false` | also write v1.4.1 |
 | 114 | `writeSequence` | `true` | `false` runs all checks without writing |
-| 116 | `execute_system_check_code` | `false` | PNS/CNS and forbidden-frequency checks |
+| 116 | `execute_system_check_code` | `true` | PNS/CNS and forbidden-frequency checks; needs `system_asc_file` and safe_pns_prediction |
 | 121–124 | `sysTypeDefault`, `sys_type` | `'skyra'` | asked at run time, see [Scanner system](#scanner-system) |
 | 129 | `ETL` | `17` | screened prefix 8–17 |
 | 130 | `TE1Requested` | `107e-3/7` | echo spacing [s]; 15.2857 ms is the RF-simulated value |
@@ -320,11 +320,11 @@ reference file name:
 
 | Reference export | Edits | System checks |
 |---|---|---|
-| MB2 `tse_m2b7v1_B15_cF2_N20_..._R1_..._TR15000_skyra` | line 228 `isAppendCalibration = false;` lines 210–211 `isUseWave_sin = false;` `isUseWave_cos = false;` | off |
-| MB2 `tse_m2b7v1_B15_cF2_N20_..._R1_..._TR12000_skyra` | lines 228, 210–211 as above; line 156 `TRRequested = 12000e-3;` | off |
-| MB2 `tse_m2b7v1_B15_cF2_wYZ_N20_..._R1_..._TR15000_skyra` | line 228 `isAppendCalibration = false;` | off |
-| MB2 `tse_m2b7v1_B15_cF2_wYZ_N20_..._R1_..._TR12000_skyra` | line 228 as above; line 156 `TRRequested = 12000e-3;` | off |
-| MB2 `tse_m2b7v1_B15_cF4_wYZ_N20_..._R2_..._TR12000_skyra` | line 228 as above; line 197 `Ry = 2;` line 203 `caipiShiftFractionFullFOV = 0.25;` line 156 `TRRequested = 12000e-3;` | off |
+| MB2 `tse_m2b7v1_B15_cF2_N20_..._R1_..._TR15000_skyra` | line 228 `isAppendCalibration = false;` line 116 `execute_system_check_code = false;` lines 210–211 `isUseWave_sin = false;` `isUseWave_cos = false;` | off |
+| MB2 `tse_m2b7v1_B15_cF2_N20_..._R1_..._TR12000_skyra` | lines 228, 116, 210–211 as above; line 156 `TRRequested = 12000e-3;` | off |
+| MB2 `tse_m2b7v1_B15_cF2_wYZ_N20_..._R1_..._TR15000_skyra` | line 228 `isAppendCalibration = false;` line 116 `execute_system_check_code = false;` | off |
+| MB2 `tse_m2b7v1_B15_cF2_wYZ_N20_..._R1_..._TR12000_skyra` | lines 228, 116 as above; line 156 `TRRequested = 12000e-3;` | off |
+| MB2 `tse_m2b7v1_B15_cF4_wYZ_N20_..._R2_..._TR12000_skyra` | lines 228, 116 as above; line 197 `Ry = 2;` line 203 `caipiShiftFractionFullFOV = 0.25;` line 156 `TRRequested = 12000e-3;` | off |
 | MB1 `tse_mb1_convEx2p5R3p1_Ncyc20_..._Ry1_..._TR13666_skyra` | line 215 `isAppendCalibration = false;` line 201 `isUseWave_sin = false;` (TR 8 s is raised to 13.666 s) | on, skyra `.asc` |
 | Calibration `..._Nacs32_os3_prisma` | none (select `prisma`) | on, prisma `.asc` |
 | Calibration `..._Nacs32_os3_skyra` | none | on, skyra `.asc` |
