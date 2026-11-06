@@ -53,6 +53,10 @@
 %   - CAIPI is implemented with balanced slice-axis blips around every
 %     readout. This preserves a fixed CPMG refocusing phase throughout the
 %     echo train. Dummy trains reproduce both Wave axes whenever enabled.
+%   - With isAppendCalibration (default), a 3D slab FLASH calibration
+%     follows the TSE in the same file: the y/z Wave PSF projections, a
+%     no-Wave z projection and a 32 x 32 ky x kz ACS for the coil maps,
+%     all as REF readouts (utils/designFlashCalibration.m).
 
 clearvars; close all; clc
 format long
@@ -111,7 +115,14 @@ writeSequence = true; % candidate remains validation-only until RF/timing review
 allowUnapprovedCandidateForResearchScan = true; % acknowledge only for the planned research scan
 execute_system_check_code = false; % set true to run PNS/CNS and forbidden-frequency checks
 
-sys_type      = 'skyra'; % CimaX, prisma, or skyra for automatic Wave timing
+% Scanner system, asked in the Command Window on every run; Enter keeps
+% sysTypeDefault. It selects the hardware limits below, the gradient model
+% expected by the system checks and the file-name suffix.
+sysTypeDefault = 'skyra';
+sys_type_options = {'prisma', 'skyra', 'Connectome2', 'C2_simulate_prisma', ...
+    'trio', 'prisma_XA30A', 'premier', 'CimaX', 'TerraX'};
+sys_type = selectStringOption('sys_type', 'Select scanner/system name', ...
+    sys_type_options, sysTypeDefault);
 
 % ------------------------- sequence timing -------------------------
 alpha          = 90;                         % [deg]
@@ -194,8 +205,10 @@ caipiPolarity = 1;                            % change sign to reverse CAIPI shi
 caipiAdcDemodSign = -1;                       % cancel group-center common z-blip phase
 
 % ------------------------- wave -------------------------
-isUseWave_sin = false;
-isUseWave_cos = false;
+% y sine and z cosine Wave are on by default. Set both to false for a
+% Cartesian (no-Wave) export; the reconstruction accepts both axes or none.
+isUseWave_sin = true;
+isUseWave_cos = true;
 gwave_max     = 10;                           % [mT/m]
 swave_max     = 140;                         % [T/m/s]
 Ncycles       = 20;                           % supported protocol options: 10 or 20
@@ -205,6 +218,16 @@ waveCosChannel = ax.d3;
 waveRepresentation = 'fullblock-arbitrary';
 waveInfoFlag  = true;
 waveDebugFlag = true;
+
+% ------------------------- appended FLASH calibration -------------------------
+% A 3D slab FLASH calibration follows the TSE in the same file: the Wave PSF
+% projections of the enabled Wave axes, a no-Wave z projection that checks
+% the z orientation of the coil maps, and a ky x kz ACS for the coil maps.
+% false writes the TSE alone, to be reconstructed with a separately acquired
+% gre_mixed_dim_mb2_calibration.m export.
+isAppendCalibration = true;
+calibrationAcsSize  = [32 32];               % ky x kz ACS lines
+calibrationAcsFovZ  = 180e-3;                % [m], ACS kz FOV, a multiple of the slice spacing
 
 %% System limits
 
@@ -1880,6 +1903,60 @@ if nAdcSamples > 0
     end
 end
 
+%% Appended 3D FLASH calibration
+
+% The calibration is designed and validated on its own sequence object and
+% then appended with the identical construction, after the TSE label and
+% k-space checks above. Its ADCs are REF readouts with a compact LIN
+% (0...N-1); see docs/calibration_storage.md. The PNS/CNS and
+% forbidden-frequency checks below cover the combined sequence.
+nTseAdc = numel(adc_lbl.LIN);
+calibration = struct();
+if isAppendCalibration
+    calibrationConfig = struct('sys_sequence', sys_sequence, 'sys_wave', sys_wave, ...
+        'sys_lowPNS', sys_lowPNS, 'physical_slew_max', physical_slew_max, ...
+        'ax', ax, 'fov', fov(1:2), 'N', [Nx Ny], 'ro_os', os_factor, ...
+        'adc', adc, 'readoutTime', readoutTime, 'Ncycles', Ncycles, ...
+        'gwave_max', gwave_max, 'swave_max', swave_max, ...
+        'wavePolarity', wavePolarity, 'includeYWave', isUseWave_sin, ...
+        'includeZWave', isUseWave_cos, 'includeZReference', true, ...
+        'slicePositions', slicePositions, 'sliceThickness', sliceThickness, ...
+        'cosineBridgeDurationBudget', cosineBridgeDurationBudget, ...
+        'Nacs', calibrationAcsSize, 'acsFovZ', calibrationAcsFovZ, ...
+        'acsGridSpacingZ', sliceCenterSpacing);
+    if isUseWave_sin
+        calibrationConfig.tseGyWave = gyWave;
+    end
+    if isUseWave_cos
+        calibrationConfig.tseGzWave = gzWave;
+    end
+    calibrationDesign = designFlashCalibration(calibrationConfig);
+    appendFlashCalibration(seq, calibrationDesign);
+    calibration = calibrationDesign.meta;
+    calibration.tseAdcCount = nTseAdc;
+    calibration.SystemType = sys_type;
+
+    [ok, error_report] = seq.checkTiming;
+    if ~ok
+        error('Timing check of the TSE with the appended calibration failed:\n%s', ...
+            strjoin(error_report, '\n'));
+    end
+    combinedLabels = seq.evalLabels('evolution', 'adc');
+    combinedLin = combinedLabels.LIN(:);
+    combinedSlc = combinedLabels.SLC(:);
+    combinedRef = combinedLabels.REF(:);
+    calibrationRange = nTseAdc+(1:calibration.expectedAdcCount);
+    assert(numel(combinedLin) == nTseAdc+calibration.expectedAdcCount && ...
+        isequal(combinedLin(1:nTseAdc), adc_lbl.LIN(:)) && ...
+        isequal(combinedSlc(1:nTseAdc), adc_lbl.SLC(:)) && ...
+        all(combinedRef(1:nTseAdc) == 0) && all(combinedRef(calibrationRange) ~= 0) && ...
+        isequal(combinedLin(calibrationRange), (0:calibration.expectedAdcCount-1).') && ...
+        all(combinedSlc(calibrationRange) == 0), ...
+        'ADC labels of the TSE with the appended calibration are inconsistent.');
+    fprintf('Appended FLASH calibration: %d REF ADCs after %d TSE ADCs, %.2f s.\n', ...
+        calibration.expectedAdcCount, nTseAdc, calibration.validation.duration);
+end
+
 %% Optional plots and report
 
 plot_seq = false;
@@ -2222,6 +2299,17 @@ seq.setDefinition('ExecuteSystemCheckCode', execute_system_check_code);
 seq.setDefinition('WriteV141Format', double(write_v141_format));
 seq.setDefinition('SimulationOnly', 0);
 seq.setDefinition('OutputPath', out_path);
+% Calibration definitions exist only with the calibration, so that a TSE
+% without it reproduces the earlier exports.
+if isAppendCalibration
+    seq.setDefinition('AppendedCalibration', 1);
+    seq.setDefinition('CalibrationStorageLayout', calibration.storageLayoutVersion);
+    seq.setDefinition('CalibrationADCCount', calibration.expectedAdcCount);
+    seq.setDefinition('CalibrationFirstADCIndex', nTseAdc); % zero-based, after the TSE ADCs
+    seq.setDefinition('CalibrationACSSize', calibration.Nacs);
+    seq.setDefinition('CalibrationACSFovZ', calibration.acsFovZ);
+    seq.setDefinition('CalibrationDuration', calibration.validation.duration);
+end
 seq.setDefinition('RFDuration', tRef); % backward-compatible refocusing duration
 seq.setDefinition('RFExcitationDuration', tEx);
 seq.setDefinition('RFRefocusingDuration', tRef);
@@ -2276,6 +2364,11 @@ else
     tag_acceleration = ['_R' num2str(Ry)];
     tag_etl = ['_E' num2str(ETL)];
 end
+if isAppendCalibration
+    tag_calibration = '_cal';
+else
+    tag_calibration = '';
+end
 b1SequenceValueTag = sprintf('%.0f', double(MB.design_max_b1_uT));
 tag_b1 = ['_B' b1SequenceValueTag];
 espTag = strrep(sprintf('%.2f', TE1*1e3), '.', 'p');
@@ -2291,6 +2384,7 @@ seqFilename = ['tse_m' num2str(SMSFactor) 'b7v1' ...
     '_ES' espTag ...
     '_TE' effectiveTeTag ...
     '_TR' num2str(round(TR*1e3)) ...
+    tag_calibration ...
     '_' sys_type];
 assert(numel([seqFilename '.seq']) <= 100, ...
     'Sequence filename exceeds 100 characters: %s.seq', seqFilename);
@@ -2309,8 +2403,17 @@ if writeSequence
     sequenceFile = fullfile(v151Path, [seqFilename '.seq']);
     metadataFile = fullfile(metadataPath, [seqFilename '_PEorder.mat']);
     seq.write(sequenceFile);
+    sequenceMetadata = struct('SequenceSignature', seq.signatureValue, ...
+        'SequenceSignatureType', seq.signatureType);
+    % The calibration tables and the signature are saved only with the
+    % calibration, so that a TSE without it reproduces the earlier sidecars.
+    sidecarExtras = {};
+    if isAppendCalibration
+        sidecarExtras = {'isAppendCalibration', 'calibration', 'sequenceMetadata'};
+    end
 
-    % Save PE ordering and candidate provenance for reconstruction and audit.
+    % Save PE ordering, candidate provenance and the appended calibration
+    % tables for reconstruction and audit.
     save(metadataFile, ...
         'PEorder', 'PEindexOrderImg', 'LINorderImg', 'phaseAreas', ...
         'imageYIdx', 'imagePESteps', 'echoTrainPositionImg', ...
@@ -2360,7 +2463,8 @@ if writeSequence
         'TEeffRequested', 'TEeff', 'effectiveEchoNumber', ...
         'TEeffAdjustment', 'TEeffWasAdapted', ...
         'TRRequested', 'TRActual', 'minimumTRWithoutFill', ...
-        'TRWasAdapted', 'TRWasRaisedToMinimum', 'TRWasRasterRounded');
+        'TRWasAdapted', 'TRWasRaisedToMinimum', 'TRWasRasterRounded', ...
+        sidecarExtras{:});
     fprintf('\nWrote imaging sequence: %s\n', sequenceFile);
     fprintf('Saved PE order and RF provenance: %s\n', metadataFile);
 else

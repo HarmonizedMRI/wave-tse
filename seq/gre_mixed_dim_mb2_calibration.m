@@ -61,7 +61,15 @@ stopAfterTimingCheck = false;
 execute_system_check_code = true;
 
 % ------------------------- system -------------------------
-sys_type = 'prisma';
+% Scanner system, asked in the Command Window on every run; Enter keeps
+% sysTypeDefault. Select the same system as for the TSE scans of the
+% session. It selects the hardware limits below, the gradient model expected
+% by the system checks and the file-name suffix.
+sysTypeDefault = 'skyra';
+sys_type_options = {'prisma', 'skyra', 'Connectome2', 'C2_simulate_prisma', ...
+    'trio', 'prisma_XA30A', 'premier', 'CimaX', 'TerraX'};
+sys_type = selectStringOption('sys_type', 'Select scanner/system name', ...
+    sys_type_options, sysTypeDefault);
 
 % ------------------------- sequence timing / RF -------------------------
 alphaPsf = 7;                               % [deg], repeated slab spoiled GRE

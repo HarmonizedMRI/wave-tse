@@ -40,6 +40,10 @@
 %   - Non-MB metadata distinguishes the regular slice sampling-grid FOV
 %     (Nz times center-to-center spacing) from the smaller edge-to-edge
 %     physical slice coverage when gaps are present.
+%   - With isAppendCalibration (default), a 3D slab FLASH calibration
+%     follows the TSE in the same file: y-Wave PSF projections when the
+%     Wave is on and a 32 x 32 ky x kz ACS for the coil maps, all as REF
+%     readouts (utils/designFlashCalibration.m).
 
 clear all; close all; clc
 format long
@@ -77,7 +81,14 @@ mbPulseMatFile = fullfile(script_dir, 'rf_pulses', ...
 write_v141_format = false;
 writeSequence = true;
 execute_system_check_code = 1;
-sys_type = 'skyra'; % prisma, skyra, Connectome2, C2_simulate_prisma, trio, prisma_XA30A, premier, CimaX
+% Scanner system, asked in the Command Window on every run; Enter keeps
+% sysTypeDefault. It selects the hardware limits below, the gradient model
+% expected by the system checks and the file-name suffix.
+sysTypeDefault = 'skyra';
+sys_type_options = {'prisma', 'skyra', 'Connectome2', 'C2_simulate_prisma', ...
+    'trio', 'prisma_XA30A', 'premier', 'CimaX', 'TerraX'};
+sys_type = selectStringOption('sys_type', 'Select scanner/system name', ...
+    sys_type_options, sysTypeDefault);
 
 % RF control. Edit this value directly in MATLAB; do not pass it through the
 % shell or environment.
@@ -184,13 +195,26 @@ Nacs_y = 32;                                 % requested minimum number of centr
 gwave_max     = 10;                           % [mT/m]
 swave_max     = 140;                         % [T/m/s]
 Ncycles       = 20;                           % supported protocol options: 10 or 20
-isUseWave_sin = false;
+% The y-sine Wave is on by default; set isUseWave_sin = false for a
+% Cartesian export. MB1 supports the y sine Wave alone, built with +1
+% polarity (isUseWave_cos stays false).
+isUseWave_sin = true;
 isUseWave_cos = false;
+wavePolarity  = 1;
 waveSinChannel = ax.d2;
 waveCosChannel = '';
 
 waveInfoFlag  = true;
 waveDebugFlag = true;
+
+% ------------------------- appended FLASH calibration -------------------------
+% A 3D slab FLASH calibration follows the TSE in the same file: the y Wave
+% PSF projections when the Wave is on and a ky x kz ACS for the coil maps.
+% false writes the TSE alone, to be reconstructed with a separately acquired
+% gre_mixed_dim_mb2_calibration.m export.
+isAppendCalibration = true;
+calibrationAcsSize  = [32 32];               % ky x kz ACS lines
+calibrationAcsFovZ  = 180e-3;                % [m], ACS kz FOV, a multiple of the slice spacing
 
 %% System limits
 
@@ -1256,6 +1280,57 @@ if nAdcSamples > 0
     end
 end
 
+%% Appended 3D FLASH calibration
+
+% The calibration is designed and validated on its own sequence object and
+% then appended with the identical construction, after the TSE label and
+% k-space checks above. Its ADCs are REF readouts with a compact LIN
+% (0...N-1); see docs/calibration_storage.md. The PNS/CNS and
+% forbidden-frequency checks below cover the combined sequence.
+assert(~isUseWave_cos, 'MB1 supports the y-sine Wave only.');
+nTseAdc = numel(adc_lbl.LIN);
+calibration = struct();
+if isAppendCalibration
+    calibrationConfig = struct('sys_sequence', sys_sequence, 'sys_wave', sys_wave, ...
+        'sys_lowPNS', sys_lowPNS, 'physical_slew_max', physical_slew_max, ...
+        'ax', ax, 'fov', fov(1:2), 'N', [Nx Ny], 'ro_os', os_factor, ...
+        'adc', adc, 'readoutTime', readoutTime, 'Ncycles', Ncycles, ...
+        'gwave_max', gwave_max, 'swave_max', swave_max, ...
+        'wavePolarity', wavePolarity, 'includeYWave', isUseWave_sin, ...
+        'includeZWave', false, 'includeZReference', false, ...
+        'slicePositions', slicePositionsGeometric, 'sliceThickness', sliceThickness, ...
+        'Nacs', calibrationAcsSize, 'acsFovZ', calibrationAcsFovZ, ...
+        'acsGridSpacingZ', sliceCenterSpacing);
+    if isUseWave_sin
+        calibrationConfig.tseGyWave = gyWave;
+    end
+    calibrationDesign = designFlashCalibration(calibrationConfig);
+    appendFlashCalibration(seq, calibrationDesign);
+    calibration = calibrationDesign.meta;
+    calibration.tseAdcCount = nTseAdc;
+    calibration.SystemType = sys_type;
+
+    [ok, error_report] = seq.checkTiming;
+    if ~ok
+        error('Timing check of the TSE with the appended calibration failed:\n%s', ...
+            strjoin(error_report, '\n'));
+    end
+    combinedLabels = seq.evalLabels('evolution', 'adc');
+    combinedLin = combinedLabels.LIN(:);
+    combinedSlc = combinedLabels.SLC(:);
+    combinedRef = combinedLabels.REF(:);
+    calibrationRange = nTseAdc+(1:calibration.expectedAdcCount);
+    assert(numel(combinedLin) == nTseAdc+calibration.expectedAdcCount && ...
+        isequal(combinedLin(1:nTseAdc), adc_lbl.LIN(:)) && ...
+        isequal(combinedSlc(1:nTseAdc), adc_lbl.SLC(:)) && ...
+        all(combinedRef(1:nTseAdc) == 0) && all(combinedRef(calibrationRange) ~= 0) && ...
+        isequal(combinedLin(calibrationRange), (0:calibration.expectedAdcCount-1).') && ...
+        all(combinedSlc(calibrationRange) == 0), ...
+        'ADC labels of the TSE with the appended calibration are inconsistent.');
+    fprintf('Appended FLASH calibration: %d REF ADCs after %d TSE ADCs, %.2f s.\n', ...
+        calibration.expectedAdcCount, nTseAdc, calibration.validation.duration);
+end
+
 %% Optional plots and report
 
 plot_seq = false;
@@ -1485,6 +1560,17 @@ seq.setDefinition('ExecuteSystemCheckCode', execute_system_check_code);
 seq.setDefinition('WriteV141Format', double(write_v141_format));
 seq.setDefinition('MetadataRevision', 'nonMB_Siemens2D_sequentialSLC_acqOrderedPositions_v3');
 seq.setDefinition('OutputPath', out_path);
+% Calibration definitions exist only with the calibration, so that a TSE
+% without it reproduces the earlier exports.
+if isAppendCalibration
+    seq.setDefinition('AppendedCalibration', 1);
+    seq.setDefinition('CalibrationStorageLayout', calibration.storageLayoutVersion);
+    seq.setDefinition('CalibrationADCCount', calibration.expectedAdcCount);
+    seq.setDefinition('CalibrationFirstADCIndex', nTseAdc); % zero-based, after the TSE ADCs
+    seq.setDefinition('CalibrationACSSize', calibration.Nacs);
+    seq.setDefinition('CalibrationACSFovZ', calibration.acsFovZ);
+    seq.setDefinition('CalibrationDuration', calibration.validation.duration);
+end
 seq.setDefinition('Name', 'tse_waveYsin');
 
 if isUseWave_sin
@@ -1498,6 +1584,11 @@ if isAcquireACS
 else
     tag_ACS = '';
 end
+if isAppendCalibration
+    tag_calibration = '_cal';
+else
+    tag_calibration = '';
+end
 teTag = strrep(sprintf('%.2f', TE1*1e3), '.', 'p');
 seqFilename = ['tse_mb1_' rfFilenameTag tag_wave tag_cycles '_' slOrientation '_' ...
     num2str(Nx) 'x' num2str(Ny) 'x' num2str(Nz) ...
@@ -1507,6 +1598,7 @@ seqFilename = ['tse_mb1_' rfFilenameTag tag_wave tag_cycles '_' slOrientation '_
     '_ETL' num2str(ETL) ...
     '_TE' teTag ...
     '_TR' num2str(round(TR*1e3)) ...
+    tag_calibration ...
     '_' sys_type];
 assert(numel([seqFilename '.seq']) <= 100, ...
     'Sequence filename exceeds 100 characters: %s.seq', seqFilename);
@@ -1530,6 +1622,14 @@ if writeSequence
     end
 
     fprintf('\nWrote sequence name: %s\n', seqFilename);
+    sequenceMetadata = struct('SequenceSignature', seq.signatureValue, ...
+        'SequenceSignatureType', seq.signatureType);
+    % The calibration tables and the signature are saved only with the
+    % calibration, so that a TSE without it reproduces the earlier sidecars.
+    sidecarExtras = {};
+    if isAppendCalibration
+        sidecarExtras = {'isAppendCalibration', 'calibration', 'sequenceMetadata'};
+    end
 
     % Save PE ordering alongside the sequence, matching the wave-TSE reference
     % workflow where PEorder is needed during reconstruction.
@@ -1553,7 +1653,8 @@ if writeSequence
         'TRRequested', 'TRActual', 'minimumTRWithoutFill', ...
         'TRWasAdapted', 'TRWasRaisedToMinimum', 'TRWasRasterRounded', ...
         'Ncycles', 'gwave_max', 'swave_max', 'isUseWave_sin', ...
-        'waveAreaY', 'waveTiming', 'sys_sequence', 'sys_wave', 'sys_lowPNS');
+        'waveAreaY', 'waveTiming', 'sys_sequence', 'sys_wave', 'sys_lowPNS', ...
+        sidecarExtras{:});
     fprintf('Saved PE order: %s\n', [out_path seqFilename '_PEorder.mat']);
 else
     fprintf('\nValidation-only run: writeSequence=false; no sequence or PE metadata written.\n');

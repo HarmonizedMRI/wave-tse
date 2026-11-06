@@ -1,11 +1,18 @@
-# Mixed calibration storage: `compact_adc_lin_v1`
+# Calibration storage
+
+Two calibrations are supported: the 3D FLASH calibration appended to a TSE
+(`appended_ref_lin_v1`, the default of both TSE generators, described
+[at the end](#appended-calibration-appended_ref_lin_v1)) and the separate
+mixed calibration (`compact_adc_lin_v1`).
+
+## Mixed calibration: `compact_adc_lin_v1`
 
 This contract applies to `seq/gre_mixed_dim_mb2_calibration.m` (introduced
 2026-10-14). Calibration exports written before it, without
 `storageLayoutVersion`, keep the older SET/PAR/SLC layout described at the
 end.
 
-## Why the scanner counters are compact
+### Why the scanner counters are compact
 
 The Wave calibration encodes y projection samples, z projection samples,
 physical CSM slices and scientific parts. Storing them in LIN, PAR, SLC and
@@ -15,7 +22,7 @@ maxima: the PSF alone has 304 acquired readouts but would occupy
 four leading empty SET positions. Reducing the receive-channel count can hide
 that allocation without fixing it.
 
-## Scanner storage contract
+### Scanner storage contract
 
 Every acquired ADC uses one unique zero-based LIN, in acquisition order.
 PAR, SLC, SET and ECO are always zero. Dummy shots have no ADC. CSM readouts
@@ -39,7 +46,7 @@ The scanner SLC counter does not report physical slice identity. Physical CSM
 slices must be recovered from the sidecar. Never FFT or interpolate across the
 CSM slice dimension.
 
-## Sidecar maps and index bases
+### Sidecar maps and index bases
 
 The matching `<name>_geometry_labels.mat` is required for reconstruction. It
 contains the scientific variables of the calibration and:
@@ -83,7 +90,7 @@ normal slice-selective FLASH sinc pulse; the TSE RF MAT supplies geometry and
 provenance only. `calibrationMetadata.TargetTseRF*` fields describe the
 target TSE, not the emitted FLASH RF.
 
-## Reading the data
+### Reading the data
 
 Do not slice arrays by SET/PAR/SLC and do not infer physical geometry from
 the scanner storage counters. With MATLAB mapVBVD, load image and reference
@@ -121,7 +128,7 @@ still provide the global mapping. CSM-only data have no PSF/image readouts.
 Historical calibration files without `storageLayoutVersion` use the old
 SET/PAR/SLC contract and need a separate loading branch.
 
-## `.seq` definition allowlist
+### `.seq` definition allowlist
 
 The calibration source sets only `Name` and `FOV` explicitly. FOV is the
 physical envelope [220, 220, 160] mm at the default prescription, not a dense
@@ -130,7 +137,7 @@ No matrix, slice-count or position arrays, scientific part IDs, coordinate
 grids, paths, provenance, Wave diagnostics or descriptive text are sent as
 scanner definitions; all of them are in the sidecar.
 
-## Generation
+### Generation
 
 `isUseWaveCalibration = true` (the default) acquires PSF + CSM; `false`
 acquires the CSM only. `writeSequence = false` runs the diagnostics and builds
@@ -138,7 +145,7 @@ the metadata without writing files. Generation refuses to overwrite an
 existing `.seq`, metadata MAT, report TXT or requested legacy v1.4.1 export;
 choose a new `out_path` in the path settings instead.
 
-## Validation record
+### Validation record
 
 MATLAB R2024b validation on 2026-10-14 used isolated temporary exports:
 
@@ -166,3 +173,68 @@ RF power and SAR do not depend on the storage layout. Compact exports were
 subsequently acquired and reconstructed (TerraX 2026-10-14, Prisma 2026-10-15
 and later TerraX sessions), each with 304 PSF `image` and 1,600 CSM `refscan`
 records.
+
+## Appended calibration: `appended_ref_lin_v1`
+
+`seq/utils/designFlashCalibration.m` and `seq/utils/appendFlashCalibration.m`
+add this calibration after the last TSE train when a TSE generator runs with
+`isAppendCalibration = true`. The TSE and its calibration are one measurement
+and one TWIX file.
+
+### Scanner storage contract
+
+- The TSE ADCs come first and keep their labels (REF=false; LIN = ky, SLC =
+  acquired group or slice); they arrive in the TWIX `image` stream.
+- Every calibration ADC is a REF readout with a unique zero-based LIN in
+  acquisition order, 0 through N-1, and PAR = SLC = SET = ECO = 0, so the
+  whole calibration arrives in the `refscan` stream. IMA stays false.
+- Dummy and settling shots have no ADC.
+
+| Mode | Parts | Calibration ADCs |
+|---|---|---:|
+| MB2 with Wave (default) | 0, 1, 2, 3, 4 | 72 + 72 + 80 + 80 + 1,024 = 1,328 |
+| MB2 without Wave | 2, 4 | 80 + 1,024 = 1,104 |
+| MB1 with Wave (default) | 0, 1, 4 | 72 + 72 + 1,024 = 1,168 |
+| MB1 without Wave | 4 | 1,024 |
+
+Parts: 0/1 no-Wave and y-sine Wave y projections, 2/3 no-Wave and z-cosine
+Wave z projections, 4 the 32 x 32 ky x kz ACS. The counts are those of the
+default configuration; the sidecar holds the actual ones.
+
+### Sidecar
+
+The TSE `_PEorder.mat` sidecar holds `isAppendCalibration = true`,
+`sequenceMetadata.SequenceSignature` (binds the sidecar to the exported
+`.seq`) and the struct `calibration`:
+
+- `storageLayoutVersion`: `appended_ref_lin_v1`.
+- `tseAdcCount`: number of TSE ADCs before the calibration;
+  `expectedAdcCount`: number of calibration ADCs.
+- `acqTable`: one record per calibration ADC with its part (`setID`), Wave
+  mode, one-based physical ky/kz grid indices, PE moments `kyArea`/`kzArea`
+  [1/m], local line indices and zero-based `rawLin0` (the scanner LIN).
+- `psfAdcIndices`, `psfValidMask`, `psfValidLengths`: the 4-row PSF table of
+  the mixed calibration, with zero rows for absent parts. Entries are
+  one-based calibration record indices.
+- `acsAdcIndices` (Nacs_y x Nacs_z), `acsKyIndices` (one-based TSE ky grid
+  indices), `acsKzIndices`, `acsKzAreas` [1/m], `acsFovZ`,
+  `acsGridSpacingZ`, `acsGridNz`: the ACS lines and the z grid on which the
+  reconstruction places them.
+- Geometry and Wave design (`fov`, `Nx`, `Ny`, `Nx_os`, `slicePositions`,
+  `sliceThickness`, `Ncycles`, `gwave_max`, `wavePolarity`,
+  `psfYCoordinates`, `psfZCoordinates`, `psfFovZ`), the RF and timing
+  (`flipAngle`, `TE`, `TR`, dummy counts) and `validation`, the report of
+  the standalone timing, label, trajectory and TE/TR checks.
+
+### z convention and grid
+
+The scanner stores the data of a kz moment `k` as `sum_z m(z) exp(+2i*pi*k*z)`,
+the negative Fourier-z convention that the mixed calibration established
+with its direct slices. The reconstruction places each ACS kz line at
+`n/2 - k*acsFovZ` of an `acsGridNz`-point grid, multiplies it by
+`exp(-2i*pi*k*z0)`, and its centered inverse FFT then gives planes at
+`z0 + (j - n/2)*acsGridSpacingZ`. `z0` (-1.5 mm by default) puts every slice
+center on a plane. When the no-Wave z projection (part 2) was acquired, the
+ACS planes at ky = 0 are compared with it in both z orientations; the stated
+orientation must win (`reports/calibration_acs_vs_z_projection.json`).
+
