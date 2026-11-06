@@ -18,6 +18,19 @@ echo spacing other than 15.2857 ms passes the sequence timing checks only.
 **The calibration refuses to write.** It never overwrites an export; choose a
 new `out_path`.
 
+**A k-space viewer shows kz off the ky axis at the MB2 ADCs.** This is the
+CAIPI blip, not unbalanced slice gradients: kz alternates between 0 and
+-6.67 1/m at the default FOV/2 shift and is rewound after every readout. The
+generator checks the residual itself; see the note below the MB2 parameter
+table in [Sequence generation](sequence.md#seqtse_2d_wave_mb2v_v3m). The
+ADCs after the TSE belong to the appended calibration: the ky and kz
+projection lines and the 32 x 32 ky-kz ACS grid.
+
+**`The calibration y-sine (or z-cosine) Wave differs from the TSE Wave`.**
+The appended calibration designs its Wave like the TSE and refuses to write
+when the two differ. Report it with the generator parameters; do not edit
+the Wave functions of only one of them.
+
 **`compare_sequence_exports.py` reports differences.** Only `OutputPath`, the
 signature hash and the sidecar path fields may differ. Check that the
 generator parameters match the reference export (see the reproduction table
@@ -26,6 +39,23 @@ that the same Pulseq version was used; formatting-only differences are marked
 as numerically equal.
 
 ## Reconstruction
+
+**`The TSE sidecar has no appended calibration; pass --calibration-twix/--calibration-seq`.**
+The TSE was exported with `isAppendCalibration = false` (or before the
+appended calibration existed). Reconstruct it with the separate mixed
+calibration of the same session.
+
+**`The TSE TWIX file has no refscan stream` or `refscan LIN coverage differs`.**
+The TWIX file holds no or not all calibration readouts, for example when the
+scan was stopped before the calibration. Check that the measurement ran to
+the end.
+
+**`The ACS planes do not have the z orientation of the z projection`.** The
+coil maps of the 3D ACS and the no-Wave z projection disagree; see
+`reports/calibration_acs_vs_z_projection.json` in the calibration folder. A
+reversed winner means a z-convention error and must be investigated before
+any reconstruction; a low correlation in both orientations points to motion
+or too little signal. Do not reconstruct with these maps.
 
 **`Existing provenance differs: .../input_manifest.json`.** The folder holds
 results of other inputs or settings. Use a new `--output-dir` (or a new

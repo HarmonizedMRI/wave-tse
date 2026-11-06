@@ -1,16 +1,18 @@
 # Wave TSE
 
 Pulseq-based 2D Wave-CAIPI turbo spin echo (TSE) sequence generation for
-single-band (MB1) and two-band simultaneous-multislice (MB2) acquisitions,
-a mixed-dimensional FLASH calibration, and Python reconstruction from
-Siemens TWIX data.
+single-band (MB1) and two-band simultaneous-multislice (MB2) acquisitions
+with an appended 3D FLASH calibration, and Python reconstruction from Siemens
+TWIX data.
 
 The repository has two intentionally separate parts:
 
-- MATLAB generates the MB2 TSE, the MB1 TSE and the calibration as three
-  independent Pulseq sequences.
-- Python reconstructs TSE data from the calibration TWIX, the TSE TWIX, and
-  the matching `.seq` files and sidecars.
+- MATLAB generates the MB2 TSE and the MB1 TSE; by default each one carries
+  its own 3D FLASH calibration (Wave PSF projections and a coil-map ACS) in
+  the same sequence file. A separate mixed-dimensional FLASH calibration
+  generator remains available.
+- Python reconstructs a TSE scan from its TWIX file and the matching `.seq`
+  file and sidecar, or with a separate calibration TWIX.
 
 `environment.yml` (conda) and `requirements.txt` (venv) define the Python
 environment. The repository is not an installable Python package.
@@ -40,6 +42,7 @@ environment. The repository is not an installable Python package.
 │   ├── utils/
 │   └── tests/
 ├── evaluation/
+│   ├── check_appended_calibration.py
 │   ├── compare_sequence_exports.py
 │   ├── compare_reconstructions.py
 │   └── tests/
@@ -95,9 +98,9 @@ variable `WAVE_TSE_REFERENCE_SEQ` names a v3 `.seq` file.
 
 | Generator | Sequence |
 |---|---|
-| `seq/tse_2d_wave_mb2v_v3.m` | MB2 TSE, 50 slices in 25 SMS groups, blipped CAIPI, optional y/z Wave |
-| `seq/tse_2d_wave_mb1.m` | MB1 TSE, 50 slices, conventional sinc RF, optional y Wave |
-| `seq/gre_mixed_dim_mb2_calibration.m` | FLASH calibration: 3D y/z Wave PSF projections and 2D slice-wise CSM |
+| `seq/tse_2d_wave_mb2v_v3.m` | MB2 TSE, 50 slices in 25 SMS groups, blipped CAIPI, y/z Wave (on by default), appended 3D FLASH calibration |
+| `seq/tse_2d_wave_mb1.m` | MB1 TSE, 50 slices, conventional sinc RF, y Wave (on by default), appended 3D FLASH calibration |
+| `seq/gre_mixed_dim_mb2_calibration.m` | separate FLASH calibration: 3D y/z Wave PSF projections and 2D slice-wise CSM |
 
 Open a generator in MATLAB, edit its in-file parameters and run it, for
 example:
@@ -109,11 +112,22 @@ tse_2d_wave_mb2v_v3
 
 The first run asks for the Pulseq folder, the optional safe_pns_prediction
 folder, the output folder and the optional scanner `.asc` file, and saves them
-in `seq/wave_tse_path_settings.json` (ignored by Git).
+in `seq/wave_tse_path_settings.json` (ignored by Git). Every run then asks
+for the scanner system (`sys_type`, default `skyra`), which sets the
+gradient limits and the file-name suffix.
+
+The appended calibration (`isAppendCalibration = true`) runs after the last
+TSE train and adds about 15 to 19 s; a session then needs one scan per TSE.
+With `isAppendCalibration = false` the TSE is written alone and needs a
+`gre_mixed_dim_mb2_calibration.m` scan in the same session. See
+[Sequence generation](docs/sequence.md#appended-flash-calibration).
 
 The MB2 RF is the distributed SigPy-optimized 50-slice TBW7 beta150 bundle in
 `seq/rf_pulses/`. To use a different MB2 pulse, generate a bundle with the
 same variables; see [Sequence generation](docs/sequence.md#rf-pulses).
+
+`evaluation/check_appended_calibration.py --seq <export>.seq` checks a TSE
+export with its appended calibration before scanning.
 
 `evaluation/compare_sequence_exports.py` compares regenerated exports and
 their sidecars with reference exports, for example after updating Pulseq:
@@ -126,8 +140,18 @@ python evaluation/compare_sequence_exports.py \
 
 ## Reconstruct
 
-`recon/recon_wave_tse_from_twix_nifti.py` reconstructs one MB1 or MB2 TSE scan
-with the calibration acquired in the same session:
+`recon/recon_wave_tse_from_twix_nifti.py` reconstructs one MB1 or MB2 TSE
+scan. With the appended calibration it needs only the TSE files:
+
+```bash
+python recon/recon_wave_tse_from_twix_nifti.py \
+  --tse-twix /path/to/meas_..._pulseq_tse_....dat \
+  --tse-seq /path/to/v151/tse_..._cal_skyra.seq \
+  --output-dir /path/to/output/tse_scan
+```
+
+A TSE without the appended calibration (or a comparison with the mixed
+calibration) adds the separate calibration of the same session:
 
 ```bash
 python recon/recon_wave_tse_from_twix_nifti.py \
@@ -140,18 +164,18 @@ python recon/recon_wave_tse_from_twix_nifti.py \
 ```
 
 The sidecars are found next to their `.seq` files. The command validates the
-headers, sequences, sidecars, ADC chronology, slice mapping and trajectories
-before it computes the shared calibration (noise whitening, coil compression,
-slice-wise ESPIRiT maps, Wave PSF) and the reconstruction: the exact
-least-squares solution for complete no-Wave MB1 data, lambda-0 CG-SENSE for
-MB2 data. It writes magnitude and phase NIfTI in scanner geometry. Output
-files are never overwritten; reruns resume from the saved checkpoints. See
-[Reconstruction](docs/reconstruction.md).
+headers, sequences, sidecars, ADC chronology, slice mapping, trajectories and
+the z orientation of the coil maps before it computes the calibration (noise
+whitening, coil compression, ESPIRiT maps of every slice, Wave PSF) and the
+reconstruction: the exact least-squares solution for complete no-Wave MB1
+data, lambda-0 CG-SENSE for MB1 Wave and MB2 data. It writes magnitude and
+phase NIfTI in scanner geometry. Output files are never overwritten; reruns
+resume from the saved checkpoints. See [Reconstruction](docs/reconstruction.md).
 
 For MB2 data, `--l1-threshold-multiple 0.5` adds an L1-wavelet regularized
 reconstruction whose band weights are scaled by the noise measured in the scan
-itself. On a CPU, `--csm-workers N` estimates the ESPIRiT maps of N slices in
-parallel.
+itself. On a CPU, `--csm-workers N` runs the ESPIRiT map estimation in N
+parallel processes.
 
 `evaluation/compare_reconstructions.py` compares a reconstruction with a
 reference result, for example for a regression after a software update.

@@ -1,6 +1,7 @@
 """Two-dimensional MB2 Wave forward, adjoint, and PCG-SENSE operators.
 
-For one SMS group, the forward model is
+The operators accept any band count; MB1 uses one band. For one SMS group,
+the forward model is
 
 ``M * sum_b D_b * F_y(P_b * F_x(S_b * x_b))``.
 
@@ -20,13 +21,13 @@ def mb2_wave_forward(x, sens, caipi_phase, wave_psf, mask):
     Parameters
     ----------
     x : torch.Tensor
-        Two complex band images shaped ``(2, Nx_os, Ny)``.
+        Complex band images shaped ``(band, Nx_os, Ny)``; band is 2 for MB2, 1 for MB1.
     sens : torch.Tensor
-        Receive sensitivities shaped ``(2, Ncoil, Nx_os, Ny)``.
+        Receive sensitivities shaped ``(band, Ncoil, Nx_os, Ny)``.
     caipi_phase : torch.Tensor
-        Unit-magnitude slice phase shaped ``(2, Ny)``.
+        Unit-magnitude slice phase shaped ``(band, Ny)``.
     wave_psf : torch.Tensor
-        Band-specific hybrid-space Wave PSF shaped ``(2, Nx_os, Ny)``.
+        Band-specific hybrid-space Wave PSF shaped ``(band, Nx_os, Ny)``.
     mask : torch.Tensor
         Sampling mask broadcastable to ``(Ncoil, Nx_os, Ny)``.
 
@@ -58,7 +59,7 @@ def mb2_wave_adjoint(y, sens, caipi_phase, wave_psf, mask):
     Returns
     -------
     torch.Tensor
-        Two adjoint band images shaped ``(2, Nx_os, Ny)``.
+        Adjoint band images shaped ``(band, Nx_os, Ny)``.
     """
     if y.ndim != 3:
         raise ValueError(f"y must be (Ncoil, Nx_os, Ny), got {tuple(y.shape)}")
@@ -132,7 +133,7 @@ def cg_sense_mb2_wave_2d(
         raise ValueError("lambda_l2 must be nonnegative.")
 
     def normal_operator(image):
-        """Apply the regularized normal operator to two band images."""
+        """Apply the regularized normal operator to the band images."""
         result = mb2_wave_adjoint(
             mb2_wave_forward(image, sens, caipi_phase, wave_psf, mask),
             sens,
@@ -222,17 +223,22 @@ def cg_sense_mb2_wave_2d(
 
 
 def _validate_encoding_shapes(sens, caipi_phase, wave_psf):
-    """Validate non-image encoding arrays for the MB2 Wave operator."""
-    if sens.ndim != 4 or sens.shape[0] != 2:
+    """Validate non-image encoding arrays for the Wave operator.
+
+    The band count is taken from ``sens``: one band for MB1, two for MB2.
+    Raises ValueError for inconsistent shapes.
+    """
+    if sens.ndim != 4 or sens.shape[0] < 1:
         raise ValueError(
-            f"sens must be (2, Ncoil, Nx_os, Ny), got {tuple(sens.shape)}"
+            f"sens must be (band, Ncoil, Nx_os, Ny), got {tuple(sens.shape)}"
         )
-    expected_phase = (2, sens.shape[-1])
+    bands = sens.shape[0]
+    expected_phase = (bands, sens.shape[-1])
     if caipi_phase.shape != expected_phase:
         raise ValueError(
             f"caipi_phase must be {expected_phase}, got {tuple(caipi_phase.shape)}"
         )
-    expected_psf = (2, sens.shape[-2], sens.shape[-1])
+    expected_psf = (bands, sens.shape[-2], sens.shape[-1])
     if wave_psf.shape != expected_psf:
         raise ValueError(
             f"wave_psf must be {expected_psf}, got {tuple(wave_psf.shape)}"
@@ -240,10 +246,10 @@ def _validate_encoding_shapes(sens, caipi_phase, wave_psf):
 
 
 def _validate_shapes(x, sens, caipi_phase, wave_psf):
-    """Validate image and encoding arrays for the MB2 Wave operator."""
+    """Validate image and encoding arrays for the Wave operator; raises ValueError."""
     _validate_encoding_shapes(sens, caipi_phase, wave_psf)
-    if x.ndim != 3 or x.shape[0] != 2:
-        raise ValueError(f"x must be (2, Nx_os, Ny), got {tuple(x.shape)}")
+    if x.ndim != 3 or x.shape[0] != sens.shape[0]:
+        raise ValueError(f"x must be ({sens.shape[0]}, Nx_os, Ny), got {tuple(x.shape)}")
     if x.shape[1:] != sens.shape[2:]:
         raise ValueError(
             f"x spatial shape {tuple(x.shape[1:])} does not match "

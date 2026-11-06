@@ -981,6 +981,7 @@ def process_wave_yz_coefficients(
     projection_quality=None,
     allow_low_amplitude_c_frequency_locked_fallback=False,
     minimum_automatic_support_fraction=0.60,
+    axes="yz",
 ):
     """Process two-axis Wave coefficients with manual or automatic support.
 
@@ -1012,6 +1013,11 @@ def process_wave_yz_coefficients(
         Required valid-sample fraction inside an automatically selected fit
         interval. The historical default is 0.60; dataset-specific callers
         may lower it only while retaining all subsequent frequency gates.
+    axes : str
+        ``"yz"`` for the two-axis Wave, or ``"y"`` for a y-sine Wave alone
+        (MB1): ``b_raw`` and ``c_z_raw`` are then ignored, ``b`` is zero,
+        ``c = c_y``, and the range selection and the frequency gates use the
+        y projection and ``a`` alone.
 
     Returns
     -------
@@ -1037,6 +1043,16 @@ def process_wave_yz_coefficients(
         if vector.ndim != 1:
             raise ValueError(f"Raw {name} coefficients must be one-dimensional.")
         raw_vectors[name] = vector
+    if axes not in ("yz", "y"):
+        raise ValueError("axes must be 'yz' or 'y'.")
+    y_only = axes == "y"
+    if y_only:
+        # Feeding the y evidence twice makes the shared a/b and y/z range
+        # criteria the y-only criteria; b itself is not fitted.
+        raw_vectors["b"] = raw_vectors["a"].copy()
+        raw_vectors["c_z"] = np.zeros_like(raw_vectors["c_y"])
+        if projection_quality is not None:
+            projection_quality = {"y": projection_quality["y"], "z": projection_quality["y"]}
     shapes = {values.shape for values in raw_vectors.values()}
     if len(shapes) != 1:
         raise ValueError("Raw two-axis coefficient vectors must have equal length.")
@@ -1093,6 +1109,8 @@ def process_wave_yz_coefficients(
         "b": raw_vectors["b"],
         "c": c_aligned,
     }
+    if y_only:
+        del coefficients["b"]
     common_valid = np.ones(nx, dtype=bool)
     for values in coefficients.values():
         common_valid &= np.isfinite(values) & (np.abs(values) <= TWO_PI)
@@ -1126,7 +1144,7 @@ def process_wave_yz_coefficients(
     expected_period = nx / float(expected_cycles)
     expected_frequency = TWO_PI / expected_period
     c_fit_failure = None
-    for name in ("a", "b", "c"):
+    for name in (("a", "c") if y_only else ("a", "b", "c")):
         try:
             processed[name], diagnostics[name] = _fit_one_coefficient(
                 name, coefficients[name], fit_inputs[name], fit_indices, kx_all, fit_range
@@ -1149,7 +1167,7 @@ def process_wave_yz_coefficients(
         for name, values in diagnostics.items()
     }
     a_frequency = diagnostics["a"]["w"]
-    b_frequency = diagnostics["b"]["w"]
+    b_frequency = a_frequency if y_only else diagnostics["b"]["w"]
     c_frequency = diagnostics["c"]["w"]
     ab_reference_frequency = 0.5 * (a_frequency + b_frequency)
     frequency_relative_errors = {
@@ -1166,16 +1184,17 @@ def process_wave_yz_coefficients(
         "a_frequency_within_10_percent_of_sequence": (
             frequency_relative_errors["a"] <= 0.10
         ),
-        "b_frequency_within_10_percent_of_sequence": (
-            frequency_relative_errors["b"] <= 0.10
-        ),
-        "a_b_frequency_difference_within_10_percent": (
-            ab_frequency_relative_difference <= 0.10
-        ),
-        "c_frequency_within_10_percent_of_ab_reference": (
-            c_frequency_relative_difference_to_ab <= 0.10
-        ),
     }
+    if not y_only:
+        period_gates["b_frequency_within_10_percent_of_sequence"] = (
+            frequency_relative_errors["b"] <= 0.10
+        )
+        period_gates["a_b_frequency_difference_within_10_percent"] = (
+            ab_frequency_relative_difference <= 0.10
+        )
+    period_gates["c_frequency_within_10_percent_of_ab_reference"] = (
+        c_frequency_relative_difference_to_ab <= 0.10
+    )
     c_fallback_reason = c_fit_failure
     if c_fit_failure is not None:
         period_relative_errors["c"] = None
@@ -1238,7 +1257,8 @@ def process_wave_yz_coefficients(
             minimum_support_fraction
         ),
         "coefficient_acceptance_range_rad": [-TWO_PI, TWO_PI],
-        "constant_combination": "c_y + c_z",
+        "wave_axes": axes,
+        "constant_combination": "c_y" if y_only else "c_y + c_z",
         "c_gauge_added_turns_2pi": int(c_gauge_turns),
         "c_gauge_added_radians": float(c_gauge_turns * TWO_PI),
         "expected_wave_cycles": int(expected_cycles),
@@ -1261,6 +1281,9 @@ def process_wave_yz_coefficients(
         "validation_passed": True,
     }
     dtype = torch.float32
+    if y_only:
+        processed["b"] = np.zeros(nx)
+        fit_inputs["b"] = np.full(nx, np.nan)
     return {
         "a_processed": torch.as_tensor(processed["a"], dtype=dtype),
         "b_processed": torch.as_tensor(processed["b"], dtype=dtype),
