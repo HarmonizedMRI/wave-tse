@@ -495,7 +495,10 @@ function report = validateStandalone(cal, Nx_os, deltakY)
     seqCal = mr.Sequence(cal.sys_sequence);
     appendFlashCalibration(seqCal, cal);
     [ok, errorReport] = seqCal.checkTiming;
-    assert(ok, 'Calibration timing check failed:\n%s', strjoin(errorReport, '\n'));
+    if ~ok
+        fprintf([errorReport{:}]);
+        error('Calibration timing check failed; see the listing above.');
+    end
 
     count = cal.meta.expectedAdcCount;
     lbl = seqCal.evalLabels('evolution', 'adc');

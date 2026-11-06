@@ -1936,10 +1936,15 @@ if isAppendCalibration
     calibration.tseAdcCount = nTseAdc;
     calibration.SystemType = sys_type;
 
+    % checkTiming stores TotalDuration; the value stored by the TSE check
+    % above is stale now and would be reported as a timing error.
+    if isKey(seq.definitions, 'TotalDuration')
+        remove(seq.definitions, 'TotalDuration');
+    end
     [ok, error_report] = seq.checkTiming;
     if ~ok
-        error('Timing check of the TSE with the appended calibration failed:\n%s', ...
-            strjoin(error_report, '\n'));
+        fprintf([error_report{:}]);
+        error('Timing check of the TSE with the appended calibration failed; see the listing above.');
     end
     combinedLabels = seq.evalLabels('evolution', 'adc');
     combinedLin = combinedLabels.LIN(:);
