@@ -189,18 +189,18 @@ Ny = 220;
 % Every Ry mode preserves its complete centered stride grid. If the number of
 % unique ky lines is not divisible by ETL, timing-only slots omit the ADC.
 % ------------------------- scanner verification stage -------------------------
-%   Stage 1: Ry=1, isUseCaipi=false, caipiShiftFractionFullFOV=0
-%   Stage 2: Ry=1, isUseCaipi=true,  caipiShiftFractionFullFOV=0.50
-%   Stage 3: Ry=2, isUseCaipi=true,  caipiShiftFractionFullFOV=0.25
-%   Ry=3:    Ry=3, isUseCaipi=true,  caipiShiftFractionFullFOV=1/6
-%   Ry=4:    Ry=4, isUseCaipi=true,  caipiShiftFractionFullFOV=1/8
+%   Stage 1: Ry=1, isUseCaipi=false
+%   Stage 2: Ry=1, isUseCaipi=true
+%   Stage 3: Ry=2, isUseCaipi=true; Ry=3 and Ry=4 also run with CAIPI.
+%   The CAIPI shift follows Ry (FOV/2, /4, /6, /8 for Ry 1-4), which puts the
+%   two bands half of the accelerated alias FOV apart, their widest separation.
 Ry = 1;                                      % acceleration along y/LIN
 isUseACS = false;                            % collapsed MB ACS cannot provide independent-slice CSMs
 Nacs_y = 0;                                  % no appended ACS; use five-SET FLASH calibration SET 4
 
 % ------------------------- SMS / CAIPI -------------------------
 isUseCaipi = true;                           % balanced slice-axis CAIPI blips
-caipiShiftFractionFullFOV = 0.5;             % relative band-1 shift / full PE FOV
+caipiShiftFractionFullFOV = double(isUseCaipi) / (2*Ry);  % band-1 shift / full PE FOV, 0 without CAIPI
 caipiPolarity = 1;                            % change sign to reverse CAIPI shift direction
 caipiAdcDemodSign = -1;                       % cancel group-center common z-blip phase
 

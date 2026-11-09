@@ -137,7 +137,7 @@ Line numbers refer to the current revision.
 | 156 | `TRRequested` | `15000e-3` | raised to the minimum when infeasible |
 | 197 | `Ry` | `1` | in-plane acceleration (1–4) |
 | 202 | `isUseCaipi` | `true` | balanced slice-axis CAIPI blips |
-| 203 | `caipiShiftFractionFullFOV` | `0.5` | 1/2, 1/4, 1/6, 1/8 for Ry 1–4 |
+| 203 | `caipiShiftFractionFullFOV` | `1/(2*Ry)` | derived, not edited: 1/2, 1/4, 1/6, 1/8 for Ry 1–4, 0 without CAIPI |
 | 210 | `isUseWave_sin` | `true` | y (PE) sine Wave |
 | 211 | `isUseWave_cos` | `true` | z (slice) cosine Wave; set both to `false` for a Cartesian export |
 | 212 | `gwave_max` | `10` | Wave amplitude [mT/m]; slew-limited at 140 T/m/s |
@@ -148,14 +148,14 @@ Line numbers refer to the current revision.
 The reconstruction accepts MB2 data with both Wave axes or with neither.
 
 With CAIPI, kz at the ADCs is not zero by design: it alternates between 0
-and the blip moment, -1/(2 x 75 mm) = -6.67 1/m for the default FOV/2 shift
+and the blip moment, -1/(2 x 75 mm) = -6.67 1/m for the FOV/(2 x Ry) shift
 and the 75 mm band separation, so a k-space viewer shows every other echo
 slightly off the ky axis. The blip is rewound after every readout, and the
 slice-axis moment before each refocusing pulse is the same in every echo
 interval. The generator prints these values under `Slice-axis kz diagnostics`
 and stops when the kz residual left after removing the designed CAIPI moment
-exceeds 1% of the PE k-space step (0.045 1/m). With `isUseCaipi = false` and
-`caipiShiftFractionFullFOV = 0`, kz is zero at every ADC.
+exceeds 1% of the PE k-space step (0.045 1/m). With `isUseCaipi = false` the
+shift is 0, and kz is zero at every ADC.
 
 ### `seq/tse_2d_wave_mb1.m`
 
@@ -324,7 +324,7 @@ reference file name:
 | MB2 `tse_m2b7v1_B15_cF2_N20_..._R1_..._TR12000_skyra` | lines 228, 116, 210–211 as above; line 156 `TRRequested = 12000e-3;` | off |
 | MB2 `tse_m2b7v1_B15_cF2_wYZ_N20_..._R1_..._TR15000_skyra` | line 228 `isAppendCalibration = false;` line 116 `execute_system_check_code = false;` | off |
 | MB2 `tse_m2b7v1_B15_cF2_wYZ_N20_..._R1_..._TR12000_skyra` | lines 228, 116 as above; line 156 `TRRequested = 12000e-3;` | off |
-| MB2 `tse_m2b7v1_B15_cF4_wYZ_N20_..._R2_..._TR12000_skyra` | lines 228, 116 as above; line 197 `Ry = 2;` line 203 `caipiShiftFractionFullFOV = 0.25;` line 156 `TRRequested = 12000e-3;` | off |
+| MB2 `tse_m2b7v1_B15_cF4_wYZ_N20_..._R2_..._TR12000_skyra` | lines 228, 116 as above; line 197 `Ry = 2;` line 156 `TRRequested = 12000e-3;` | off |
 | MB1 `tse_mb1_convEx2p5R3p1_Ncyc20_..._Ry1_..._TR13666_skyra` | line 215 `isAppendCalibration = false;` line 201 `isUseWave_sin = false;` (TR 8 s is raised to 13.666 s) | on, skyra `.asc` |
 | Calibration `..._Nacs32_os3_prisma` | none (select `prisma`) | on, prisma `.asc` |
 | Calibration `..._Nacs32_os3_skyra` | none | on, skyra `.asc` |
