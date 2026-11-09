@@ -179,7 +179,7 @@ fovScalar = 220e-3;
 Nx = 440;
 % Ny = 420;
 % Nx = 210;
-Ny = 220;
+Ny = 440;                                    % 0.5 x 0.5 mm in plane; 220 gives 0.5 x 1 mm
 Nz = Nslices;
 
 % ------------------------- acceleration / undersampling -------------------------

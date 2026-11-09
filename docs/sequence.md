@@ -135,6 +135,7 @@ Line numbers refer to the current revision.
 | 132 | `allowUnvalidatedEchoSpacing` | `true` | permits an ESP outside the RF simulation (timing checks only) |
 | 137 | `minimumEchoSpacing` | `14.89e-3` | shortest accepted echo spacing [s]; see [Echo spacing](#echo-spacing) |
 | 156 | `TRRequested` | `15000e-3` | raised to the minimum when infeasible |
+| 186 | `Ny` | `440` | PE matrix: 0.5 x 0.5 mm in plane; `220` gives 0.5 x 1 mm |
 | 197 | `Ry` | `1` | in-plane acceleration (1–4) |
 | 202 | `isUseCaipi` | `true` | balanced slice-axis CAIPI blips |
 | 203 | `caipiShiftFractionFullFOV` | `1/(2*Ry)` | derived, not edited: 1/2, 1/4, 1/6, 1/8 for Ry 1–4, 0 without CAIPI |
@@ -169,6 +170,7 @@ shift is 0, and kz is zero at every ADC.
 | 101–103 | `ETL`, `TE1Requested`, `TEeffRequested` | `17`, `107e-3/7`, `107e-3` | |
 | 107 | `minimumEchoSpacing` | `14.89e-3` | same floor as the MB2 generator |
 | 137 | `TRRequested` | `8000e-3` | raised to the minimum when infeasible |
+| 182 | `Ny` | `440` | PE matrix, as for MB2 |
 | 190 | `Ry` | `1` | undersampled grids are reconstructed with CG-SENSE |
 | 197 | `Ncycles` | `20` | |
 | 201 | `isUseWave_sin` | `true` | y-sine Wave; `false` for a Cartesian export. MB1 has no z Wave |
@@ -185,12 +187,16 @@ shift is 0, and kz is zero at every ADC.
 | 61 | `execute_system_check_code` | `true` | PNS/CNS above 0.95 is an error |
 | 68–71 | `sysTypeDefault`, `sys_type` | `'skyra'` | asked at run time, see [Scanner system](#scanner-system) |
 | 75–76 | `alphaPsf`, `alphaCsm` | `7`, `20` | flip angles [deg] |
+| 88 | `N` | `[440 440]` | in-plane matrix; must equal the TSE `[Nx Ny]` |
 | 93–98 | `Ncalib_y`, `Ncalib_z`, `Nacs_y` | `72`, `80`, `32` | PSF and CSM line counts |
 | 111–113 | `gwave_max`, `Ncycles` | `10`, `20` | must match the Wave TSE |
 
 The calibration readout, ADC, y-sine, z-cosine and bridge timing reproduce
-`tse_2d_wave_mb2v_v3.m`. Use a calibration exported with the same `Ncycles`
-and Wave amplitude as the Wave TSE it calibrates.
+`tse_2d_wave_mb2v_v3.m`. Use a calibration exported with the same `Ncycles`,
+Wave amplitude and in-plane matrix as the Wave TSE it calibrates; the
+reconstruction takes the TSE grid from the calibration. Its PSF and CSM
+lines are the central ky lines, so the matrix changes only the sidecar
+and the file name, not the acquired lines.
 
 ### Appended FLASH calibration
 
@@ -290,33 +296,35 @@ data.
 
 File names encode the main parameters:
 
-- MB2: `tse_m2b7v1_B15_cF2_wYZ_N20_TRA_440x220x50_F220_R1_os3_E17_ES15p29_TE107_TR15000_skyra`
+- MB2: `tse_m2b7v1_B15_cF2_wYZ_N20_TRA_440x440x50_F220_R1_os3_E17_ES15p29_TE107_TR15000_skyra`
   — `B` design B1 limit [uT]; `cF<n>` CAIPI shift of FOV/n of the full PE
   FOV (`noC` without CAIPI); `wYZ`, `wY`, `wZ` active Wave axes; `N` Wave
   cycles; matrix and FOV [mm]; `R` acceleration (`R3p73` is Ry 3 with the
-  complete 73-line grid); readout oversampling; `E` ETL; `ES` echo spacing
-  and `TE` effective TE [ms]; `TR` realized TR [ms]; `_cal` with the appended
-  calibration; `sys_type`. The default export is
-  `tse_m2b7v1_B15_cF2_wYZ_N20_TRA_440x220x50_F220_R1_os3_E17_ES15p29_TE107_TR15000_cal_skyra`.
-- MB1: `tse_mb1_convEx2p5R3p1_Ncyc20_TRA_440x220x50_FOV220_Ry1_os3_ETL17_TE15p29_TR13666_skyra`
+  complete 73-line grid of Ny = 220); readout oversampling; `E` ETL; `ES`
+  echo spacing and `TE` effective TE [ms]; `TR` realized TR [ms]; `_cal`
+  with the appended calibration; `sys_type`. The default export is
+  `tse_m2b7v1_B15_cF2_wYZ_N20_TRA_440x440x50_F220_R1_os3_E17_ES15p29_TE107_TR15000_cal_skyra`.
+- MB1: `tse_mb1_convEx2p5R3p1_Ncyc20_TRA_440x440x50_FOV220_Ry1_os3_ETL17_TE15p29_TR13666_skyra`
   — RF design, optional `wY`, Wave cycles, matrix, FOV [mm], `Ry`, readout
   oversampling, ETL, echo spacing (`TE` tag) [ms], realized TR [ms], `_cal`
   with the appended calibration, `sys_type`.
-- Calibration: `gre_mixed_dim_mb2_calib_waveYZ3dproj_csm2d_Ncyc20_440x220x80_FOV220_Nacs32_os3_prisma`
+- Calibration: `gre_mixed_dim_mb2_calib_waveYZ3dproj_csm2d_Ncyc20_440x440x80_FOV220_Nacs32_os3_prisma`
   — `waveYZ3dproj_csm2d` (PSF + CSM) or `csm2donly`, Wave cycles, PSF matrix
   `Nx x Ny x Ncalib_z`, FOV [mm], CSM lines, readout oversampling, `sys_type`.
 
 ## Reproducing the reference exports
 
 The generators were imported unchanged except for their path handling, the
-system prompt, the Wave defaults, the appended calibration and the
-echo-spacing floor. With `isAppendCalibration = false` none of these changes
-the exported TSE or its sidecar for the same parameters, so regenerating with
-the parameters of an acquired export is expected to reproduce it; the
-comparison below tests this. The scanned reference exports have no appended
+system prompt, the Wave defaults, the appended calibration, the echo-spacing
+floor and the 440 x 440 matrix. With `isAppendCalibration = false` none of
+these changes the exported TSE or its sidecar for the same parameters, so
+regenerating with the parameters of an acquired export is expected to
+reproduce it; the comparison below tests this. The scanned reference exports have no appended
 calibration. Starting from the committed defaults, edit only the listed
 lines, and at the system prompt select the system named at the end of the
-reference file name:
+reference file name. The reference exports use the former 440 x 220 matrix,
+so every row also needs line 186 `Ny = 220;` (MB2), line 182 `Ny = 220;`
+(MB1) or line 88 `N = [440 220];` (calibration):
 
 | Reference export | Edits | System checks |
 |---|---|---|

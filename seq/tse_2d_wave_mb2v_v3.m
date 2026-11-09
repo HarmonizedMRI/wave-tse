@@ -183,7 +183,7 @@ fovScalar = 220e-3;
 Nx = 440;
 % Ny = 420;
 % Nx = 210;
-Ny = 220;
+Ny = 440;                                    % 0.5 x 0.5 mm in plane; 220 gives 0.5 x 1 mm
 
 % ------------------------- acceleration / undersampling -------------------------
 % Every Ry mode preserves its complete centered stride grid. If the number of
@@ -2360,9 +2360,11 @@ if isAcquireACS
 else
     tag_ACS = '';
 end
-if Ry == 3
+if Ry == 3 && Ny == 220
     % Distinguish the complete 73-line grid from historical 66-line Ry3
     % exports while keeping the scanner-facing sequence filename compact.
+    % Other matrices have no such exports and keep the plain _R3 tag; the
+    % 147-line Ny = 440 grid as _R3p147 would exceed the 100-character limit.
     tag_acceleration = '_R3p73';
     tag_etl = ['_E' num2str(ETL)];
 else

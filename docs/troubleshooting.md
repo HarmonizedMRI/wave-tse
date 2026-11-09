@@ -139,8 +139,8 @@ are reconstructed exactly from a complete grid; omit
 `--l1-threshold-multiple`.
 
 **`The native ... matrix does not allow ... periodized wavelet levels`.**
-Both native matrix sizes must be divisible by `2**levels`; the 440 x 220
-protocol needs `--l1-wavelet-levels 2`.
+Both native matrix sizes must be divisible by `2**levels`; the default
+440 x 440 matrix allows 3, a 440 x 220 export needs `--l1-wavelet-levels 2`.
 
 **`The lambda-0 prediction holds ...% of the far-margin power`.** The Wave
 spread reaches the outer 20% of the oversampled readout, so these margins

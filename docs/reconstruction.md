@@ -32,7 +32,8 @@ Without `--calibration-twix` the TSE file must carry the appended calibration
 (`isAppendCalibration` in its sidecar). With `--calibration-twix`, the
 separate calibration is used, also for a TSE that carries an appended one;
 the TSE ADCs are then read alone. This is how the two coil-map methods are
-compared on one TSE scan.
+compared on one TSE scan. A separate calibration must have the TSE's
+in-plane matrix (`N` of the calibration generator equal to `[Nx Ny]`).
 
 Use the exact `.seq` and sidecar files exported for the acquisition. The TWIX
 header records the sequence file name, and the sequence signatures recorded in
@@ -270,9 +271,9 @@ C = 0.5 was chosen by visual review on the TerraX 2026-10-25 R2x4 scan
 (MB2 x Ry4, 0.24 mm, 7 T). That research reconstruction took the readout
 profile from a fully sampled 2026-10-19 scan without removing the share
 absorbed by its fit; on group 12 of the R2x4 scan the per-scan profile gives
-5% larger weights. C has not been reviewed on other protocols. The 220 PE
-lines of the published 440 x 220 protocol allow at most 2 wavelet levels
-(`--l1-wavelet-levels 2`).
+5% larger weights. C has not been reviewed on other protocols. The default
+440 x 440 matrix allows the default 3 wavelet levels; a 440 x 220 export
+allows at most 2 (`--l1-wavelet-levels 2`).
 
 ### NIfTI export
 
@@ -366,7 +367,7 @@ OUT=/path/to/new/output/folder
 
 python recon/recon_wave_tse_from_twix_nifti.py \
   --tse-twix $DATA/meas_..._tse_..._cal_skyra.dat \
-  --tse-seq $SEQ/v151/tse_m2b7v1_B15_cF2_wYZ_N20_TRA_440x220x50_F220_R1_os3_E17_ES15p29_TE107_TR15000_cal_skyra.seq \
+  --tse-seq $SEQ/v151/tse_m2b7v1_B15_cF2_wYZ_N20_TRA_440x440x50_F220_R1_os3_E17_ES15p29_TE107_TR15000_cal_skyra.seq \
   --csm-workers 8 \
   --output-dir $OUT/tse_3d_acs
 ```
@@ -379,7 +380,7 @@ with the separate calibration and compare the two volumes:
 ```bash
 python recon/recon_wave_tse_from_twix_nifti.py \
   --calibration-twix $DATA/meas_..._pulseq_calib.dat \
-  --calibration-seq $SEQ/gre_mixed_dim_mb2_calib_waveYZ3dproj_csm2d_Ncyc20_440x220x80_FOV220_Nacs32_os3_skyra.seq \
+  --calibration-seq $SEQ/gre_mixed_dim_mb2_calib_waveYZ3dproj_csm2d_Ncyc20_440x440x80_FOV220_Nacs32_os3_skyra.seq \
   --tse-twix $DATA/meas_..._tse_..._cal_skyra.dat \
   --tse-seq $SEQ/v151/tse_m2b7v1_..._cal_skyra.seq \
   --calibration-dir $OUT/mixed_calibration \

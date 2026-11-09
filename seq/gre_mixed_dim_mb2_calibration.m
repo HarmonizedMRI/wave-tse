@@ -85,7 +85,7 @@ maximumDesiredSequenceDuration = 40;         % [s], fail before writing if excee
 
 % ------------------------- geometry / sampling -------------------------
 fov = [220 220]*1e-3;                        % [m], x/y
-N = [440 220];
+N = [440 440];                               % in-plane matrix; equal to the TSE [Nx Ny]
 ro_os = 3;
 ro_dur = 6600e-6;                            % [s]
 ro_spoil = 3;
