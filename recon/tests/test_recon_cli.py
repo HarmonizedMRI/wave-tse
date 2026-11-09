@@ -192,6 +192,23 @@ class SliceMappingTests(unittest.TestCase):
         np.testing.assert_array_equal(actual, group_by_slc[slc] - 1)
         self.assertTrue(report["method"].startswith("RF waveform"))
 
+    def test_zero_carrier_mirrored_sidecar(self):
+        """Waveforms translated to minus the sidecar centers map to the mirrored groups."""
+        centers = np.array([-.03, 0., .03])
+        group_by_slc = np.array([2, 3, 1])  # one-based, as written by MATLAB
+        slc = np.array([0, 1, 2, 1])
+        seq = translated_excitation_sequence(-centers[group_by_slc[slc] - 1], -1)
+        actual, report = cli.map_excitations_to_groups(
+            seq, {"SLC": slc}, np.zeros(4), np.full(4, 2e5), {"groupBySlc": group_by_slc}, centers)
+        np.testing.assert_array_equal(actual, 2 - (group_by_slc[slc] - 1))
+        self.assertIn("mirror", report["method"])
+        # Without a mirror in the table the sidecar failure stands.
+        asymmetric = np.array([-.03, 0., .02])
+        seq = translated_excitation_sequence(-asymmetric[group_by_slc[slc] - 1], -1)
+        with self.assertRaises(ValueError):
+            cli.map_excitations_to_groups(seq, {"SLC": slc}, np.zeros(4), np.full(4, 2e5),
+                                          {"groupBySlc": group_by_slc}, asymmetric)
+
 
 class ScannerSliceListTests(unittest.TestCase):
     """Check the raw SLI counters and positions of the two scanner slice lists."""

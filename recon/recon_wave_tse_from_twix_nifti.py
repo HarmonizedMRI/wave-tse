@@ -1147,6 +1147,11 @@ def map_excitations_to_groups(seq, labels, carrier, gradient, pe, centers):
     the group offset in the RF waveform: the sidecar ``groupBySlc`` mapping
     is then accepted only if demodulating every excitation at its group
     center recovers one common RF envelope and the opposite sign does not.
+    The product-control MB1 generator translates its waveforms with the
+    opposite sign and so excites the z-mirror of its sidecar table; when the
+    waveforms verify at minus the sidecar centers instead, every ADC is mapped
+    to the group at minus its sidecar center and the report says so. The MB1
+    FLASH mapping check remains the independent test of either mapping.
 
     Args:
         seq: Pulseq sequence of the TSE.
@@ -1172,8 +1177,18 @@ def map_excitations_to_groups(seq, labels, carrier, gradient, pe, centers):
                         "max_position_error_m": error}
     group_by_slc = np.asarray(pe["groupBySlc"], int) - 1
     actual = group_by_slc[np.asarray(labels["SLC"], int)]
-    report = verify_waveform_slice_translation(seq, centers[actual])
-    return actual, {"method": "RF waveform modulation at the sidecar groupBySlc centers", **report}
+    try:
+        report = verify_waveform_slice_translation(seq, centers[actual])
+        return actual, {"method": "RF waveform modulation at the sidecar groupBySlc centers", **report}
+    except ValueError as sidecar_error:
+        # Group at minus each center; only a symmetric table has a mirror.
+        mirror = [np.flatnonzero(np.isclose(centers, -center, rtol=0, atol=1e-6)) for center in centers]
+        if any(len(match) != 1 for match in mirror):
+            raise sidecar_error
+        mirrored = np.array([match[0] for match in mirror])[actual]
+        report = verify_waveform_slice_translation(seq, centers[mirrored])
+        return mirrored, {"method": "RF waveform modulation at minus the sidecar groupBySlc centers "
+                                    "(the RF excites the mirror of the sidecar table)", **report}
 
 
 def verify_waveform_slice_translation(seq, adc_positions):
