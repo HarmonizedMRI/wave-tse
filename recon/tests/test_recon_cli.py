@@ -224,27 +224,37 @@ class ScannerSliceListTests(unittest.TestCase):
             cli.scanner_slice_counters([0, 1, 2, 3, 1, 2], slc, 3)
 
     def test_listed_positions_of_both_slice_lists(self):
-        """Group centers and first bands are accepted for the mapped group, other slices are not."""
+        """Group centers and first bands, also mirrored, are accepted for the mapped group; others are not."""
         groups = self.group_by_slc - 1
         # Group-center list: the scanner sorts the centers, so SLC k gets counter rank(k).
         slc_to_sli = np.argsort(np.argsort(self.centers[groups]))
         mapping = np.full(3, -1)
         mapping[slc_to_sli] = groups
         pe = {"iceSlicePositions": self.centers[groups]}
-        counters, listed = cli.listed_slice_positions(pe, slc_to_sli, mapping, self.centers,
-                                                      self.positions, self.pairs)
+        counters, listed, sign = cli.listed_slice_positions(pe, slc_to_sli, mapping, self.centers,
+                                                            self.positions, self.pairs)
         np.testing.assert_array_equal(counters, [0, 1, 2])
         np.testing.assert_allclose(listed, self.centers[mapping[counters]])
+        self.assertEqual(sign, 1)
         # Physical list: first bands in SLC order, then second bands; six counters, three with data.
         table = np.r_[self.positions[self.pairs[groups, 0]], self.positions[self.pairs[groups, 1]]]
         ranks = np.argsort(np.argsort(table))
         slc_to_sli = ranks[:3]
         mapping = np.full(6, -1)
         mapping[slc_to_sli] = groups
-        counters, listed = cli.listed_slice_positions({"iceSlicePositions": table}, slc_to_sli, mapping,
-                                                      self.centers, self.positions, self.pairs)
+        counters, listed, sign = cli.listed_slice_positions({"iceSlicePositions": table}, slc_to_sli, mapping,
+                                                            self.centers, self.positions, self.pairs)
         np.testing.assert_array_equal(counters, np.sort(slc_to_sli))
         np.testing.assert_allclose(listed, self.positions[self.pairs[mapping[counters], 0]])
+        self.assertEqual(sign, 1)
+        # Product-control sequences excite the mirror of their table: the
+        # excitation maps each SLI to the group at minus the listed position.
+        mirrored = np.full(6, -1)
+        mirror_group = {g: int(np.flatnonzero(np.isclose(self.centers, -self.centers[g]))[0]) for g in range(3)}
+        mirrored[slc_to_sli] = [mirror_group[g] for g in groups]
+        _, _, sign = cli.listed_slice_positions({"iceSlicePositions": table}, slc_to_sli, mirrored,
+                                                self.centers, self.positions, self.pairs)
+        self.assertEqual(sign, -1)
         # A listed position outside the mapped group is rejected.
         wrong = table.copy()
         wrong[0] = self.positions[self.pairs[groups[1], 0]]
@@ -252,9 +262,10 @@ class ScannerSliceListTests(unittest.TestCase):
             cli.listed_slice_positions({"iceSlicePositions": wrong}, slc_to_sli, mapping,
                                        self.centers, self.positions, self.pairs)
         # Without the sidecar field the mapped group centers are used.
-        counters, listed = cli.listed_slice_positions({}, slc_to_sli, mapping, self.centers,
-                                                      self.positions, self.pairs)
+        counters, listed, sign = cli.listed_slice_positions({}, slc_to_sli, mapping, self.centers,
+                                                            self.positions, self.pairs)
         np.testing.assert_allclose(listed, self.centers[mapping[counters]])
+        self.assertEqual(sign, 1)
 
 
 class CalibrationMapTests(unittest.TestCase):

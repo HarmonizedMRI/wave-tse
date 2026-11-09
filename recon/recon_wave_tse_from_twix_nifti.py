@@ -660,9 +660,11 @@ def listed_slice_positions(pe, slc_to_sli, mapping, centers, positions, pairs):
 
     A sidecar with ``iceSlicePositions`` gives the position listed for each
     SLC label: the group center, or the first band of the group with
-    ``scannerSliceGeometry = 'physical'``. It must be the center or a band of
-    the group that the excitation analysis mapped to that SLI. Sidecars
-    without the field give the mapped group center.
+    ``scannerSliceGeometry = 'physical'``. Up to one global sign it must be
+    the center or a band of the group that the excitation analysis mapped to
+    that SLI; the product-control generators excite the z-mirror of their
+    sidecar table, so the sign is found and returned rather than assumed.
+    Sidecars without the field give the mapped group center.
 
     Args:
         pe: TSE sidecar.
@@ -673,25 +675,25 @@ def listed_slice_positions(pe, slc_to_sli, mapping, centers, positions, pairs):
         pairs: (ngroups, band) zero-based physical slice indices.
 
     Returns:
-        tuple: ``(counters, listed)``, the raw SLI counters with data in
-        ascending order and their listed positions [m].
+        tuple: ``(counters, listed, sign)``, the raw SLI counters with data in
+        ascending order, their listed positions [m] and the sign (+1 or -1)
+        with which the listed positions fall in the mapped groups.
 
     Raises:
-        ValueError: If a listed position is neither the center nor a band of
-            its mapped group.
+        ValueError: If, for both signs, a listed position is neither the
+            center nor a band of its mapped group.
     """
     counters = np.flatnonzero(np.asarray(mapping) >= 0)
     if "iceSlicePositions" not in pe:
-        return counters, centers[mapping[counters]]
+        return counters, centers[mapping[counters]], 1
     table = np.atleast_1d(np.asarray(pe["iceSlicePositions"], float))
     label = {int(sli): index for index, sli in enumerate(slc_to_sli)}
     listed = np.array([table[label[int(sli)]] for sli in counters])
-    for sli, value in zip(counters, listed):
-        group = mapping[sli]
-        allowed = np.r_[centers[group], positions[pairs[group]]]
-        if not np.any(np.isclose(value, allowed, rtol=0, atol=1e-6)):
-            raise ValueError(f"The sidecar slice position of raw SLI {sli} is not in its mapped group")
-    return counters, listed
+    for sign in (1, -1):
+        if all(np.any(np.isclose(sign * value, np.r_[centers[mapping[sli]], positions[pairs[mapping[sli]]]],
+                                 rtol=0, atol=1e-6)) for sli, value in zip(counters, listed)):
+            return counters, listed, sign
+    raise ValueError("The sidecar slice positions are not in their mapped groups for either sign")
 
 
 def header_contract(scan, sequence_path, meta):
@@ -1075,13 +1077,14 @@ def audit_tse(paths, scan, meta, geometry, cal_encoding, folders, allowed_missin
     # Without a scalar carrier the scanner cannot derive the offsets;
     # all-zero offsets are then reported only.
     mdh_offsets = np.asarray(mdh_offsets)
-    _, listed = listed_slice_positions(pe, sequence_slc_to_sli, mapping, centers, positions, pairs)
+    _, listed, listed_sign = listed_slice_positions(pe, sequence_slc_to_sli, mapping, centers, positions, pairs)
     # The offsets lie along the slice normal, which is tilted on an oblique stack.
     expected_offsets = np.outer(listed * 1e3, header["normal"])
     signs = [sign for sign in (1, -1)
              if np.allclose(mdh_offsets, sign * expected_offsets, atol=3e-3, rtol=0)]
     if signs:
-        mdh_check = f"MDH slice offsets equal {signs[0]:+d} x the listed slice positions of the mapped groups"
+        mdh_check = (f"MDH slice offsets equal {signs[0]:+d} x the listed slice positions, which equal "
+                     f"{listed_sign:+d} x positions of the excitation-mapped groups")
     elif mapping_report["method"].startswith("RF waveform") and np.allclose(mdh_offsets, 0, atol=3e-3):
         mdh_check = "MDH slice offsets are all zero (no scalar carrier); not compared"
     else:
