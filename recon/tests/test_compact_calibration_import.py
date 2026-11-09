@@ -7,7 +7,7 @@ from unittest.mock import patch
 import numpy as np
 
 from utils.compact_calibration_import import index_compact_streams, read_records
-from utils.compact_calibration_import import compare_direct_slice_fourier_z
+from utils.compact_calibration_import import compare_direct_slice_fourier_z, fourier_z_direction_gate
 
 
 def fake_stream(lin):
@@ -87,6 +87,46 @@ class CompactImportTests(unittest.TestCase):
             report = compare_direct_slice_fourier_z(None, None, meta)
         self.assertGreater(report["hypotheses"]["-1"]["median_supported_correlation"], .99999)
         self.assertLess(report["hypotheses"]["1"]["median_supported_correlation"], .7)
+        gate = fourier_z_direction_gate(report)
+        self.assertTrue(gate["passed"])
+        self.assertEqual(gate["negative_wins"], len(gate["discriminating_slices_0based"]))
+
+    def test_fourier_z_gate_uses_discriminating_slices(self):
+        """A smooth coil passes when correct, fails when flipped, and is inconclusive without contrast."""
+        positions = (np.arange(50) - 24.5) * .003
+        rng = np.random.default_rng(3)
+
+        def report(direct_sign, width):
+            """Build a report from Gaussian coil profiles of the given z width [m]."""
+            centers = rng.uniform(-.08, .08, 8)
+            phase = np.exp(1j * rng.uniform(0, 2 * np.pi, 8))
+            def profile(z):
+                """Return the complex coil vectors (slice, coil) at positions z."""
+                return np.exp(-((z[:, None] - centers) / width)**2) * phase
+            direct = profile(direct_sign * -positions)
+            sample = {sign: profile(sign * positions) for sign in (1, -1)}
+
+            def similarity(a, b):
+                """Return the normalized complex inner product magnitude per slice."""
+                return abs(np.sum(a.conj() * b, axis=-1)) / (np.linalg.norm(a, axis=-1) * np.linalg.norm(b, axis=-1))
+
+            hypotheses = {str(sign): {"correlation_by_slice": similarity(direct, sample[sign]).tolist()}
+                          for sign in (1, -1)}
+            return {"hypotheses": hypotheses, "support_slices_0based": list(range(50)),
+                    "mirror_correlation_by_slice": similarity(sample[1], sample[-1]).tolist()}
+
+        # A coil that varies slowly along z: the old median gap would be small.
+        correct = report(1, .12)
+        old_gap = (np.median(correct["hypotheses"]["-1"]["correlation_by_slice"])
+                   - np.median(correct["hypotheses"]["1"]["correlation_by_slice"]))
+        self.assertLess(old_gap, .2)
+        self.assertTrue(fourier_z_direction_gate(correct)["passed"])
+        flipped = fourier_z_direction_gate(report(-1, .12))
+        self.assertTrue(flipped["conclusive"])
+        self.assertFalse(flipped["passed"])
+        flat = fourier_z_direction_gate(report(1, 5.))
+        self.assertFalse(flat["conclusive"])
+        self.assertFalse(flat["passed"])
 
 
 if __name__ == "__main__":

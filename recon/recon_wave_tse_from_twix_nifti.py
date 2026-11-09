@@ -80,7 +80,7 @@ from utils.appended_calibration import (
 )
 from utils.coil_sensitivity import estimate_espirit_csm_2d_slicewise
 from utils.compact_calibration_import import (
-    compare_direct_slice_fourier_z, index_compact_streams, load_compact_metadata,
+    compare_direct_slice_fourier_z, fourier_z_direction_gate, index_compact_streams, load_compact_metadata,
     open_twix, read_compact_records, read_records,
 )
 from utils.l1_noise_model import (
@@ -805,12 +805,13 @@ def audit_calibration(paths, scan, record_index, meta, folders):
     del seq, trajectory
     gc.collect()
     direction = compare_direct_slice_fourier_z(scan, record_index, meta)
+    direction["gate"] = fourier_z_direction_gate(direction)
     save_json_if_absent(folders["reports"] / "calibration_direct_vs_fourier_z.json", direction)
-    negative = direction["hypotheses"]["-1"]["median_supported_correlation"]
-    positive = direction["hypotheses"]["1"]["median_supported_correlation"]
-    if negative < .95 or negative - positive < .2:
-        raise ValueError(f"Calibration does not establish the negative Fourier-z convention: "
-                         f"{negative}, {positive}")
+    if not direction["gate"]["conclusive"]:
+        raise ValueError("Calibration Fourier-z direction is inconclusive: the Fourier-z coil profile tells too "
+                         f"few slices from their mirror ({direction['gate']})")
+    if not direction["gate"]["passed"]:
+        raise ValueError(f"Calibration does not establish the negative Fourier-z convention: {direction['gate']}")
     save_npz(cache, **result)
     return result
 

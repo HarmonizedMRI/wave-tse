@@ -98,7 +98,17 @@ exported with other Wave cycles or amplitude.
 
 **`Calibration does not establish the negative Fourier-z convention`.** The
 calibration's direct slices and Fourier-z projection do not agree; the
-calibration acquisition cannot be used.
+calibration acquisition cannot be used. The decision uses only slices whose
+Fourier-z coil profile differs from its mirror (mirror correlation <= 0.9):
+all of them must favor the negative convention, with a median normalized gap
+(neg - pos) / (1 - mirror) of at least 0.5. A coil that varies slowly along z
+(the 18-channel HeadNeck_20 of 2026-11-09) keeps the positive score high
+without contradicting the negative convention.
+
+**`Calibration Fourier-z direction is inconclusive`.** Fewer than 10 supported
+slices have a Fourier-z coil profile that differs from its mirror, so the
+direction cannot be decided; use a longer object or a coil with more z
+structure.
 
 **`Wave PSF validation failed`.** Inspect
 `figures/wave_coefficient_fit_<tag>.png` and

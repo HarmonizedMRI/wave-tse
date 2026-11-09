@@ -194,15 +194,65 @@ def compare_direct_slice_fourier_z(scan, record_index, meta):
     valid = power > .05 * power.max()
     if valid.sum() < 10:
         raise ValueError("Insufficient direct-slice signal to establish Fourier-z direction.")
-    scores = {}
+    def similarity(a, b):
+        """Return the magnitude of the normalized complex inner product per slice."""
+        return abs(np.sum(a.conj() * b, axis=-1)) / np.maximum(
+            np.linalg.norm(a, axis=-1) * np.linalg.norm(b, axis=-1), 1e-30)
+
+    scores, samples = {}, {}
     for sign in (1, -1):
-        sample = np.stack([np.interp(sign * positions, coordinate, profile[:, c].real)
-                           + 1j * np.interp(sign * positions, coordinate, profile[:, c].imag)
-                           for c in range(profile.shape[1])], axis=-1)
-        correlation = abs(np.sum(direct.conj() * sample, axis=-1)) / np.maximum(
-            np.linalg.norm(direct, axis=-1) * np.linalg.norm(sample, axis=-1), 1e-30)
+        samples[sign] = np.stack([np.interp(sign * positions, coordinate, profile[:, c].real)
+                                  + 1j * np.interp(sign * positions, coordinate, profile[:, c].imag)
+                                  for c in range(profile.shape[1])], axis=-1)
+        correlation = similarity(direct, samples[sign])
         scores[str(sign)] = {"correlation_by_slice": correlation.tolist(),
                              "median_supported_correlation": float(np.median(correlation[valid])),
                              "minimum_supported_correlation": float(np.min(correlation[valid]))}
+    # How alike the Fourier-z profile is at +p and -p; both hypotheses share
+    # it, so only slices where it differs can tell the two signs apart.
+    mirror = similarity(samples[1], samples[-1])
     return {"hypotheses": scores, "support_slices_0based": np.flatnonzero(valid).tolist(),
+            "mirror_correlation_by_slice": mirror.tolist(),
             "method": "complex receive-vector similarity; calibration only, no TSE residual fitting"}
+
+
+def fourier_z_direction_gate(report, mirror_limit=.9, minimum_slices=10, minimum_normalized_gap=.5):
+    """Decide whether a direct-slice/Fourier-z report establishes the negative convention.
+
+    The positive-hypothesis score is close to the mirror correlation m of the
+    Fourier-z profile at +p and -p, a property of the receive coil: a coil
+    that varies slowly along z keeps it high even for a correct calibration.
+    The decision therefore uses only slices where the profile tells +p from
+    -p (m <= mirror_limit) and normalizes the gap by 1 - m, which is about +1
+    for the negative convention and -1 for a flipped calibration.
+
+    Args:
+        report: :func:`compare_direct_slice_fourier_z` result.
+        mirror_limit: Largest mirror correlation of a discriminating slice.
+        minimum_slices: Fewest discriminating supported slices for a decision.
+        minimum_normalized_gap: Smallest median of (neg - pos) / (1 - m).
+
+    Returns:
+        dict: ``passed``, ``conclusive``, the negative median over supported
+        slices, the discriminating slices, how many of them favor the
+        negative convention and the median normalized gap.
+    """
+    support = np.asarray(report["support_slices_0based"], int)
+    negative = np.asarray(report["hypotheses"]["-1"]["correlation_by_slice"], float)
+    positive = np.asarray(report["hypotheses"]["1"]["correlation_by_slice"], float)
+    mirror = np.asarray(report["mirror_correlation_by_slice"], float)
+    useful = support[mirror[support] <= mirror_limit]
+    result = {"rule": f"negative median >= 0.95; >= {minimum_slices} supported slices with mirror correlation "
+                      f"<= {mirror_limit}; negative > positive on all of them; median (neg - pos) / (1 - mirror) "
+                      f">= {minimum_normalized_gap}",
+              "negative_median_supported": float(np.median(negative[support])),
+              "discriminating_slices_0based": useful.tolist(),
+              "conclusive": bool(len(useful) >= minimum_slices)}
+    if len(useful):
+        gap = (negative[useful] - positive[useful]) / (1 - mirror[useful])
+        result["negative_wins"] = int(np.sum(negative[useful] > positive[useful]))
+        result["median_normalized_gap"] = float(np.median(gap))
+    result["passed"] = bool(result["conclusive"] and result["negative_median_supported"] >= .95
+                            and result["negative_wins"] == len(useful)
+                            and result["median_normalized_gap"] >= minimum_normalized_gap)
+    return result
