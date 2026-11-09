@@ -193,6 +193,70 @@ class SliceMappingTests(unittest.TestCase):
         self.assertTrue(report["method"].startswith("RF waveform"))
 
 
+class ScannerSliceListTests(unittest.TestCase):
+    """Check the raw SLI counters and positions of the two scanner slice lists."""
+
+    def setUp(self):
+        """Build three MB2 groups of six physical slices acquired in the order 2, 0, 1."""
+        self.positions = np.arange(6) * .003 - .0075
+        self.pairs = np.array([[0, 3], [1, 4], [2, 5]])
+        self.centers = self.positions[self.pairs].mean(axis=1)
+        self.group_by_slc = np.array([3, 1, 2])  # one-based, SLC order
+
+    def test_stack_center_is_the_protocol_mean(self):
+        """The protocol list gives the center even when only some slices hold data."""
+        yaps = {("sSliceArray", "lSize"): 4.0}
+        for index, tra in enumerate((-30., -10., 10., 30.)):
+            yaps[("sSliceArray", "asSlice", str(index), "sPosition", "dTra")] = tra
+            yaps[("sSliceArray", "asSlice", str(index), "sPosition", "dCor")] = 5.
+        mdh = np.array([[0., 5., -30.], [0., 5., -10.]])
+        np.testing.assert_allclose(cli.protocol_stack_center(yaps, mdh), [0., 5., 0.])
+        np.testing.assert_allclose(cli.protocol_stack_center({}, mdh), [0., 5., -20.])
+
+    def test_counters_need_only_be_distinct(self):
+        """Group-center lists give 0..n-1, physical lists other counters; repeats are rejected."""
+        slc = np.array([0, 1, 2, 0, 1, 2])
+        np.testing.assert_array_equal(cli.scanner_slice_counters([2, 0, 1, 2, 0, 1], slc, 3), [2, 0, 1])
+        np.testing.assert_array_equal(cli.scanner_slice_counters([5, 3, 4, 5, 3, 4], slc, 3), [5, 3, 4])
+        with self.assertRaises(ValueError):
+            cli.scanner_slice_counters([1, 1, 2, 1, 1, 2], slc, 3)
+        with self.assertRaises(ValueError):
+            cli.scanner_slice_counters([0, 1, 2, 3, 1, 2], slc, 3)
+
+    def test_listed_positions_of_both_slice_lists(self):
+        """Group centers and first bands are accepted for the mapped group, other slices are not."""
+        groups = self.group_by_slc - 1
+        # Group-center list: the scanner sorts the centers, so SLC k gets counter rank(k).
+        slc_to_sli = np.argsort(np.argsort(self.centers[groups]))
+        mapping = np.full(3, -1)
+        mapping[slc_to_sli] = groups
+        pe = {"iceSlicePositions": self.centers[groups]}
+        counters, listed = cli.listed_slice_positions(pe, slc_to_sli, mapping, self.centers,
+                                                      self.positions, self.pairs)
+        np.testing.assert_array_equal(counters, [0, 1, 2])
+        np.testing.assert_allclose(listed, self.centers[mapping[counters]])
+        # Physical list: first bands in SLC order, then second bands; six counters, three with data.
+        table = np.r_[self.positions[self.pairs[groups, 0]], self.positions[self.pairs[groups, 1]]]
+        ranks = np.argsort(np.argsort(table))
+        slc_to_sli = ranks[:3]
+        mapping = np.full(6, -1)
+        mapping[slc_to_sli] = groups
+        counters, listed = cli.listed_slice_positions({"iceSlicePositions": table}, slc_to_sli, mapping,
+                                                      self.centers, self.positions, self.pairs)
+        np.testing.assert_array_equal(counters, np.sort(slc_to_sli))
+        np.testing.assert_allclose(listed, self.positions[self.pairs[mapping[counters], 0]])
+        # A listed position outside the mapped group is rejected.
+        wrong = table.copy()
+        wrong[0] = self.positions[self.pairs[groups[1], 0]]
+        with self.assertRaises(ValueError):
+            cli.listed_slice_positions({"iceSlicePositions": wrong}, slc_to_sli, mapping,
+                                       self.centers, self.positions, self.pairs)
+        # Without the sidecar field the mapped group centers are used.
+        counters, listed = cli.listed_slice_positions({}, slc_to_sli, mapping, self.centers,
+                                                      self.positions, self.pairs)
+        np.testing.assert_allclose(listed, self.centers[mapping[counters]])
+
+
 class CalibrationMapTests(unittest.TestCase):
     """Check the parallel ESPIRiT scheduling (the ESPIRiT call itself is replaced)."""
 

@@ -147,7 +147,11 @@ TSE:
   (v3 MB2, whose RF waveforms encode the group offset) the sidecar
   `groupBySlc` mapping, accepted only when demodulating every excitation at
   its group center recovers one RF envelope and the opposite sign fails;
-- scanner MDH slice offsets equal to the mapped group centers along the slice
+- one scanner slice counter (raw SLI) per sequence SLC label, distinct across
+  labels; with every physical slice listed to the scanner (`scannerSliceGeometry
+  = 'physical'`) only the counters of the first bands hold data;
+- scanner MDH slice offsets equal to the slice positions the sidecar lists
+  for the mapped groups (group centers, or first bands) along the slice
   normal, up to one global sign, which is recorded (-1 for the Prisma MB1 conventional-sinc scan, +1 for
   the Prisma MB2 scans of 2026-10-15);
 - sampled kx, ky and kz equal to the calibration-derived trajectory within
@@ -280,8 +284,10 @@ allows at most 2 (`--l1-wavelet-levels 2`).
 The centered-IFFT PE axis runs opposite the header PE axis and the direct
 calibration slices run opposite Fourier-z, so the volume is flipped along PE
 and slice before the TWIX-derived affine is applied (`twix_inplane_rot_sign
--1`, stack center from the MDH slice positions). Magnitude and phase are
-written as float32 NIfTI and read back; values and affine must match exactly.
+-1`, stack center = mean of the protocol slice list, which is the mean of
+the MDH positions whenever every listed slice holds data). Magnitude and
+phase are written as float32 NIfTI and read back; values and affine must
+match exactly.
 
 ## Example: Prisma 2026-10-15 MB1 conventional-sinc regression
 

@@ -600,6 +600,100 @@ def check_slice_normal(normal):
                          f"normal {list(normal)}")
 
 
+def protocol_stack_center(yaps, mdh_positions):
+    """Return the stack center [mm] as the mean of the protocol slice list.
+
+    The MDH position of every raw SLI is the protocol slice with that index.
+    An MB2 sequence that lists all physical slices to the scanner fills only
+    the first band of each group with data, so the mean of the MDH positions
+    would leave the stack center; the protocol list keeps it.
+
+    Args:
+        yaps: ``MeasYaps`` header dictionary.
+        mdh_positions: (readout, 3) MDH slice positions [mm], used only when
+            the header has no slice list.
+
+    Returns:
+        numpy.ndarray: (3,) scanner-coordinate stack center [mm] (sag, cor, tra).
+    """
+    count = int(float(yaps.get(("sSliceArray", "lSize"), 0)))
+    if not count:
+        return np.mean(np.unique(np.asarray(mdh_positions)[:, :3], axis=0), axis=0)
+    protocol = [[float(yaps.get(("sSliceArray", "asSlice", str(index), "sPosition", key), 0))
+                 for key in ("dSag", "dCor", "dTra")] for index in range(count)]
+    return np.mean(protocol, axis=0)
+
+
+def scanner_slice_counters(raw_sli, slc, ngroups):
+    """Return the scanner slice counter (raw SLI) of every sequence SLC label.
+
+    The scanner gives SLC = k the counter of the k-th ``SlicePositions`` entry
+    in its position-sorted slice list. With the group centers listed the
+    counters are 0 to ngroups - 1; with all physical slices listed they are
+    the counters of the first bands, so they only have to be distinct.
+
+    Args:
+        raw_sli: Raw SLI counter of every acquired readout.
+        slc: Sequence SLC label of the same readouts.
+        ngroups: Number of slice groups (SLC labels 0 to ngroups - 1).
+
+    Returns:
+        numpy.ndarray: (ngroups,) raw SLI of each SLC label.
+
+    Raises:
+        ValueError: If a label maps to several counters or two labels share one.
+    """
+    raw_sli, slc = np.asarray(raw_sli, int), np.asarray(slc, int)
+    counters = np.full(ngroups, -1, int)
+    for label in range(ngroups):
+        values = np.unique(raw_sli[slc == label])
+        if values.size != 1:
+            raise ValueError("A sequence SLC label does not map to one scanner SLI counter")
+        counters[label] = values[0]
+    if len(np.unique(counters)) != ngroups or counters.min() < 0:
+        raise ValueError("Sequence SLC to scanner SLI is not one-to-one")
+    return counters
+
+
+def listed_slice_positions(pe, slc_to_sli, mapping, centers, positions, pairs):
+    """Return the slice position [m] the scanner lists for every raw SLI with data.
+
+    A sidecar with ``iceSlicePositions`` gives the position listed for each
+    SLC label: the group center, or the first band of the group with
+    ``scannerSliceGeometry = 'physical'``. It must be the center or a band of
+    the group that the excitation analysis mapped to that SLI. Sidecars
+    without the field give the mapped group center.
+
+    Args:
+        pe: TSE sidecar.
+        slc_to_sli: (ngroups,) raw SLI of each SLC label.
+        mapping: Raw SLI -> zero-based group, -1 for counters without data.
+        centers: (ngroups,) group centers [m].
+        positions: Physical slice positions [m].
+        pairs: (ngroups, band) zero-based physical slice indices.
+
+    Returns:
+        tuple: ``(counters, listed)``, the raw SLI counters with data in
+        ascending order and their listed positions [m].
+
+    Raises:
+        ValueError: If a listed position is neither the center nor a band of
+            its mapped group.
+    """
+    counters = np.flatnonzero(np.asarray(mapping) >= 0)
+    if "iceSlicePositions" not in pe:
+        return counters, centers[mapping[counters]]
+    table = np.atleast_1d(np.asarray(pe["iceSlicePositions"], float))
+    label = {int(sli): index for index, sli in enumerate(slc_to_sli)}
+    listed = np.array([table[label[int(sli)]] for sli in counters])
+    for sli, value in zip(counters, listed):
+        group = mapping[sli]
+        allowed = np.r_[centers[group], positions[pairs[group]]]
+        if not np.any(np.isclose(value, allowed, rtol=0, atol=1e-6)):
+            raise ValueError(f"The sidecar slice position of raw SLI {sli} is not in its mapped group")
+    return counters, listed
+
+
 def header_contract(scan, sequence_path, meta):
     """Validate a TWIX header against its sequence and the calibration geometry.
 
@@ -609,7 +703,8 @@ def header_contract(scan, sequence_path, meta):
         meta: Compact calibration sidecar (matrix and FOV).
 
     Returns:
-        dict: Scanner-coordinate stack center ``center_sct_mm``, in-plane
+        dict: Scanner-coordinate stack center ``center_sct_mm`` (mean of
+        the protocol slice list, :func:`protocol_stack_center`), in-plane
         rotation, receive-element identities, coil count, frequency, FOV and
         the coil insertion timestamps (recorded, not compared).
 
@@ -639,7 +734,7 @@ def header_contract(scan, sequence_path, meta):
                   if "sCoilSelectMeas" in k and "asList" in k and k[-1] == "uiInsertionTime"}
     if not coils:
         raise ValueError("Missing receive-element identities")
-    return {"center_sct_mm": np.mean(np.unique(stream.slicePos[:, :3], axis=0), axis=0).tolist(),
+    return {"center_sct_mm": protocol_stack_center(yaps, stream.slicePos).tolist(),
             "rotation_rad": float(yaps.get(prefix + ("dInPlaneRot",), 0)),
             "coils": coils, "physical_coils": int(stream.NCha), "fov_mm": fov_mm, "normal": normal,
             "frequency_hz": float(yaps[("sTXSPEC", "asNucleusInfo", "0", "lFrequency")]),
@@ -945,14 +1040,7 @@ def audit_tse(paths, scan, meta, geometry, cal_encoding, folders, allowed_missin
                          f"{allowed_missing_adcs} missing final ADCs ({missing} missing)")
     if not np.array_equal(np.unique(slc), np.arange(ngroups)):
         raise ValueError("Sequence SLC labels do not enumerate the slice groups")
-    sequence_slc_to_sli = np.full(ngroups, -1, int)
-    for label in range(ngroups):
-        values = np.unique(raw_sli[slc[:acquired] == label])
-        if values.size != 1:
-            raise ValueError("A sequence SLC label does not map to one scanner SLI counter")
-        sequence_slc_to_sli[label] = values[0]
-    if not np.array_equal(np.sort(sequence_slc_to_sli), np.arange(ngroups)):
-        raise ValueError("Sequence SLC to scanner SLI is not a bijection")
+    sequence_slc_to_sli = scanner_slice_counters(raw_sli, slc[:acquired], ngroups)
 
     slots = np.asarray(pe["imageAdcMask"], bool)
     ordered = np.asarray(pe["LINorderImg"], int).T[slots.T]
@@ -963,10 +1051,11 @@ def audit_tse(paths, scan, meta, geometry, cal_encoding, folders, allowed_missin
             raise ValueError("Sequence LIN order of a slice group differs from the PE sidecar")
 
     actual, mapping_report = map_excitations_to_groups(seq, labels, carrier, gradient, pe, centers)
-    mapping = np.full(ngroups, -1, int)
+    # Raw SLI -> group; counters of listed slices without data stay -1.
+    mapping = np.full(int(sequence_slc_to_sli.max()) + 1, -1, int)
     mdh_positions = np.asarray(stream.slicePos)[:, :3]
     mdh_offsets = []
-    for sli in range(ngroups):
+    for sli in np.sort(sequence_slc_to_sli):
         use = raw_sli == sli
         groups = np.unique(actual[:acquired][use])
         if groups.size != 1 or not np.array_equal(raw_lin[use], ordered[:use.sum()]):
@@ -976,25 +1065,27 @@ def audit_tse(paths, scan, meta, geometry, cal_encoding, folders, allowed_missin
         if unique.shape[0] != 1:
             raise ValueError("Scanner MDH slice position varies within one SLI")
         mdh_offsets.append(unique[0] - np.asarray(header["center_sct_mm"]))
-    if not np.array_equal(np.sort(mapping), np.arange(ngroups)):
+    if not np.array_equal(np.sort(mapping[mapping >= 0]), np.arange(ngroups)):
         raise ValueError("Raw SLI counters do not cover every physical slice group")
     # Independent check: the MDH slice offsets written by the scanner must
-    # equal the mapped group centers up to one global sign. The sign is
-    # recorded, not assumed: on the Prisma 2026-10-15 data it is -1 for the
-    # MB1 conventional-sinc scan and +1 for the MB2 scans. Without a scalar
-    # carrier the scanner cannot derive the offsets; all-zero offsets are
-    # then reported only.
+    # equal the slice positions listed for the mapped groups (group centers,
+    # or first bands when all physical slices are listed) up to one global
+    # sign. The sign is recorded, not assumed: on the Prisma 2026-10-15 data
+    # it is -1 for the MB1 conventional-sinc scan and +1 for the MB2 scans.
+    # Without a scalar carrier the scanner cannot derive the offsets;
+    # all-zero offsets are then reported only.
     mdh_offsets = np.asarray(mdh_offsets)
+    _, listed = listed_slice_positions(pe, sequence_slc_to_sli, mapping, centers, positions, pairs)
     # The offsets lie along the slice normal, which is tilted on an oblique stack.
-    expected_offsets = np.outer(centers[mapping] * 1e3, header["normal"])
+    expected_offsets = np.outer(listed * 1e3, header["normal"])
     signs = [sign for sign in (1, -1)
              if np.allclose(mdh_offsets, sign * expected_offsets, atol=3e-3, rtol=0)]
     if signs:
-        mdh_check = f"MDH slice offsets equal {signs[0]:+d} x the mapped group centers"
+        mdh_check = f"MDH slice offsets equal {signs[0]:+d} x the listed slice positions of the mapped groups"
     elif mapping_report["method"].startswith("RF waveform") and np.allclose(mdh_offsets, 0, atol=3e-3):
         mdh_check = "MDH slice offsets are all zero (no scalar carrier); not compared"
     else:
-        raise ValueError("Scanner MDH slice offsets differ from the mapped group centers for both signs")
+        raise ValueError("Scanner MDH slice offsets differ from the listed slice positions for both signs")
 
     # Encoding tables of the complete sequence; missing final ADCs only clear mask entries.
     trajectory = sequence_trajectory(paths["seq"]).reshape(3, -1, nx_os).transpose(1, 0, 2)[:tse_adcs]
@@ -1030,6 +1121,7 @@ def audit_tse(paths, scan, meta, geometry, cal_encoding, folders, allowed_missin
              "calibration_source": meta.get("kind", "mixed"), "tse_adc_count": tse_adcs,
              "acquired_lines": ordered.tolist(),
              "raw_sli_to_physical_group": mapping.tolist(), "sequence_slc_to_raw_sli": sequence_slc_to_sli.tolist(),
+             "scanner_slice_geometry": str(pe.get("scannerSliceGeometry", "group centers (not recorded)")),
              "physical_pairs_0based": pairs.tolist(), "physical_mapping": mapping_report,
              "mdh_position_check": mdh_check, "trajectory_max_error_per_m": errors,
              "phase_convention": "exp(+i*2*pi*(2*A-kz_base)*z-i*adc_phase)",
@@ -1825,7 +1917,8 @@ def verify_mb1_calibration_mapping(scan, basis, meta, calibration_folders, folde
         return
     nx, ny, nx_os, nslices = (int(meta[key]) for key in ("Nx", "Ny", "Nx_os", "Nslices"))
     rows = native_rows(nx, nx_os)
-    slices = sorted({int(round(v)) for v in np.linspace(0, nslices - 1, 5)})
+    counters = np.flatnonzero(encoding["mapping"] >= 0)
+    slices = sorted({int(counters[int(round(v))]) for v in np.linspace(0, len(counters) - 1, 5)})
     results = []
     is_wave = audit is not None and audit["wave"]
     complete = bool(np.all(encoding["mask"] == 1)) if "mask" in encoding else True

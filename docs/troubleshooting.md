@@ -88,8 +88,9 @@ groups at the sidecar positions. Check that the sidecar belongs to the
 sequence and that the scan used the same calibration geometry.
 
 **`Scanner MDH slice offsets differ ... for both signs`.** The scanner slice
-positions do not follow the mapped groups in order and spacing. The raw SLI
-counters, sequence labels and sidecar are inconsistent; do not reconstruct.
+positions do not follow the slice positions listed for the mapped groups.
+The raw SLI counters, sequence labels and sidecar are inconsistent; do not
+reconstruct.
 
 **`TSE and calibration trajectories do not match`.** The readout, PE or Wave
 encoding of the TSE differs from the calibration, for example a calibration
