@@ -452,6 +452,138 @@ class MB1UndersampledTests(unittest.TestCase):
                 self.assertGreater(result["reversed_mapping_residual"], 3 * result["stated_mapping_residual"])
 
 
+def noisy_undersampled_case(tmp, noise_std, reverse_stack=False):
+    """Write maps and return Ry2 Wave data of six slices with white noise for the MB1 mapping check.
+
+    Args:
+        tmp: Temporary folder.
+        noise_std: Standard deviation of the complex noise added to every k-space sample.
+        reverse_stack: Store the data of slice p under slice nslices - 1 - p.
+
+    Returns:
+        tuple: ``(meta, cal, fit, encoding, data, calibration_folders, folders)``.
+    """
+    ncoil, nx, nx_os, ny, nslices = 12, 8, 24, 32, 6
+    rng = np.random.default_rng(11)
+    x, yy = np.mgrid[:nx, :ny]
+    meta = {"Nx": nx, "Ny": ny, "Nx_os": nx_os, "Nslices": nslices, "fov": [.22, .22], "psfFovZ": .16,
+            "slicePositions": np.linspace(-.06, .06, nslices)}
+    cal = {"delta_y": 2 * np.sin(np.linspace(0, 4 * np.pi, nx_os))}
+    fit = {"a_processed": np.zeros(nx_os), "b_processed": np.zeros(nx_os), "c_processed": np.zeros(nx_os)}
+    mask = np.zeros((nslices, ny), np.float32)
+    mask[:, ::2] = 1
+    encoding = {"mapping": np.arange(nslices), "pairs": np.arange(nslices)[:, None],
+                "phase": np.ones((nslices, 1, ny), np.complex64), "mask": mask}
+    calibration_folders, folders = cli.output_folders(Path(tmp) / "cal"), cli.output_folders(Path(tmp) / "tse")
+    np.save(calibration_folders["cache"] / "global_coil_basis.npy", np.eye(ncoil))
+    data = {}
+    for p in range(nslices):
+        # Gaussian coil profiles with their own phase ramps, so that the maps of
+        # two slices are as unrelated as those of slices far apart in a head coil.
+        centers = rng.uniform(0, [nx, ny], (ncoil, 2))
+        ramps = rng.uniform(-.8, .8, (ncoil, 2))
+        maps = np.stack([np.exp(-((x - cx) ** 2 + (yy - cy) ** 2) / 40 + 1j * (ax * x + ay * yy))
+                         for (cx, cy), (ax, ay) in zip(centers, ramps)])
+        maps /= np.sqrt(np.sum(abs(maps) ** 2, axis=0))
+        np.save(calibration_folders["cache"] / f"csm_slice_{p:02d}.npy", maps.astype(np.complex64))
+        sens = np.zeros((1, ncoil, nx_os, ny), np.complex64)
+        sens[0, :, cli.native_rows(nx, nx_os)] = maps
+        image = np.zeros((1, nx_os, ny), np.complex64)
+        image[0, cli.native_rows(nx, nx_os)] = 1 + np.cos(yy / 3)
+        psf = torch.as_tensor(cli.wave_psf(np.array([p]), meta, cal, fit, ny, use_z=False))
+        clean = mb2_wave_forward(torch.as_tensor(image), torch.as_tensor(sens),
+                                 torch.ones((1, ny), dtype=torch.complex64), psf,
+                                 torch.as_tensor(mask[p][None, None])).numpy()
+        noise = noise_std * (rng.normal(size=clean.shape) + 1j * rng.normal(size=clean.shape)) * mask[p][None, None]
+        data[nslices - 1 - p if reverse_stack else p] = (clean + noise).astype(np.complex64)
+    return meta, cal, fit, encoding, data, calibration_folders, folders
+
+
+class MB1NoisyMappingTests(unittest.TestCase):
+    """Check the MB1 slice-mapping decision on noise-dominated data."""
+
+    @staticmethod
+    def deciding(stated, reversed_residual, **evidence):
+        """Return five test-slice results whose second and fourth hold the given values."""
+        plain = {"stated_mapping_residual": .1, "reversed_mapping_residual": .9}
+        chosen = {"stated_mapping_residual": stated, "reversed_mapping_residual": reversed_residual, **evidence}
+        return [dict(plain), dict(chosen), dict(plain), dict(chosen), dict(plain)]
+
+    def test_residual_limits_decide_clean_data(self):
+        """Residuals inside the limits establish the mapping without any noise evidence."""
+        results = self.deciding(.13, .95)
+        self.assertTrue(cli.mb1_mapping_decision(results))
+        self.assertEqual(results[1]["established_by"], "residual limits")
+        self.assertNotIn("established_by", results[0])
+
+    def test_explained_signal_decides_noise_dominated_data(self):
+        """Residuals of a 7 T 0.24 mm phantom slice pass through the signal rule, and fail when reversed."""
+        evidence = cli.mb1_noise_evidence((.8432, .9618), (.0500, .0499), .46, 1.)
+        self.assertAlmostEqual(evidence["stated_signal_share"], (1 - .8432 ** 2 - .05) / .95)
+        self.assertAlmostEqual(evidence["noise_only_residual"], np.sqrt(.95 * .46))
+        self.assertLess(evidence["reversed_signal_share"], .2 * evidence["stated_signal_share"])
+        results = self.deciding(.8432, .9618, **evidence)
+        self.assertTrue(cli.mb1_mapping_decision(results))
+        self.assertEqual(results[3]["established_by"], "explained signal")
+        swapped = cli.mb1_noise_evidence((.9618, .8432), (.0499, .0500), .46, 1.)
+        self.assertFalse(cli.mb1_mapping_decision(self.deciding(.9618, .8432, **swapped)))
+
+    def test_signal_rule_needs_measured_noise(self):
+        """Without a noise estimate, or with noise below the residual limits, a poor residual fails."""
+        evidence = cli.mb1_noise_evidence((.8432, .9618), (.05, .05), None, 1.)
+        self.assertIsNone(evidence["noise_only_residual"])
+        self.assertFalse(cli.mb1_mapping_decision(self.deciding(.8432, .9618, **evidence)))
+        quiet = cli.mb1_noise_evidence((.8432, .9618), (.05, .05), .01, 1.)
+        results = self.deciding(.8432, .9618, **quiet)
+        self.assertFalse(cli.mb1_mapping_decision(results))
+        self.assertIsNone(results[1]["established_by"])
+
+    def test_signal_rule_rejects_ambiguous_and_empty_slices(self):
+        """Reversed maps that explain most of the signal, or a slice without signal, fail."""
+        ambiguous = cli.mb1_noise_evidence((.80, .85), (.05, .05), .5, 1.)
+        self.assertGreater(ambiguous["reversed_signal_share"], .5 * ambiguous["stated_signal_share"])
+        self.assertFalse(cli.mb1_mapping_decision(self.deciding(.80, .85, **ambiguous)))
+        empty = cli.mb1_noise_evidence((.970, .974), (.05, .05), .9, 1.)
+        self.assertLess(empty["stated_signal_share"], cli.MB1_MAPPING_MIN_SIGNAL_SHARE)
+        self.assertFalse(cli.mb1_mapping_decision(self.deciding(.970, .974, **empty)))
+
+    def test_margin_noise_energy(self):
+        """White noise is measured on the margins; margins inside the native FOV give no estimate."""
+        generator = torch.Generator().manual_seed(5)
+        noise = torch.randn((4, 60, 16), dtype=torch.complex64, generator=generator)
+        lines = np.arange(0, 16, 2)
+        energy = cli.margin_noise_energy(noise, lines, cli.native_rows(20, 60), 60 * len(lines))
+        self.assertAlmostEqual(energy / float(torch.sum(abs(noise[:, :, lines]) ** 2)), 1, delta=.1)
+        self.assertIsNone(cli.margin_noise_energy(noise, lines, slice(10, 50), 60 * len(lines)))
+
+    def test_noisy_undersampled_data_pass_by_explained_signal(self):
+        """Noise that puts the residual above 0.4 no longer hides a correct mapping."""
+        with tempfile.TemporaryDirectory() as tmp:
+            meta, cal, fit, encoding, data, calibration_folders, folders = noisy_undersampled_case(tmp, .25)
+            with mock.patch.object(cli, "load_group_data", side_effect=lambda scan, group, *a: (data[group], group)):
+                cli.verify_mb1_calibration_mapping(None, None, meta, calibration_folders, folders, encoding,
+                                                   cal, fit, {"wave": True})
+            report = json.loads((folders["reports"] / "mb1_flash_mapping_validation.json").read_text())
+            self.assertTrue(report["passed"], report)
+            for result in report["slices"][1:4:2]:
+                self.assertGreater(result["stated_mapping_residual"], cli.MB1_MAPPING_MAX_RESIDUAL)
+                self.assertEqual(result["established_by"], "explained signal")
+                self.assertGreaterEqual(result["noise_only_residual"], cli.MB1_MAPPING_MAX_RESIDUAL)
+                # Twelve coils, Ry 2 and 3x readout oversampling: the fit explains 2 / (12 * 3) of white noise.
+                self.assertAlmostEqual(result["noise_floor_stated"], 1 / 18, delta=.01)
+
+    def test_noisy_reversed_stack_fails(self):
+        """The same noisy data stored in reversed slice order are rejected."""
+        with tempfile.TemporaryDirectory() as tmp:
+            meta, cal, fit, encoding, data, calibration_folders, folders = noisy_undersampled_case(tmp, .25, True)
+            with mock.patch.object(cli, "load_group_data", side_effect=lambda scan, group, *a: (data[group], group)):
+                with self.assertRaises(ValueError):
+                    cli.verify_mb1_calibration_mapping(None, None, meta, calibration_folders, folders, encoding,
+                                                       cal, fit, {"wave": True})
+            report = json.loads((folders["reports"] / "mb1_flash_mapping_validation.json").read_text())
+            self.assertFalse(report["passed"])
+
+
 class AppendedCliTests(unittest.TestCase):
     """Check input resolution, the TSE/calibration ADC split and the 3D-ACS map files."""
 

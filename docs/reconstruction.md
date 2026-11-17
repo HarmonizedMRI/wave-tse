@@ -210,7 +210,20 @@ Fourier-z test establishes.
   coil-vector projection (after an exact Wave-PSF deconvolution for Wave data),
   on an undersampled grid by the data residual of a CG solve with each map. The
   stated mapping must give the lower residual on all five and a residual below
-  0.4 and below half the reversed one on the second and fourth.
+  0.4 and below half the reversed one on the second and fourth. These
+  residuals count the noise of the data, so noise-dominated data (small
+  voxels, a small object in the oversampled readout) cannot meet the two
+  limits even with the right maps. For a slice that misses them, the noise is
+  measured on the far readout margins (the outer 20% of the oversampled
+  readout at each end). Only if that noise alone would leave a residual above
+  one of the limits, the signal that each candidate explains decides instead:
+  the explained energy `1 - residual^2` is corrected by the share of noise
+  that the same fit explains (the same CG solve of synthetic white noise; 1 /
+  coils for the projection), the signal explained by the stated maps must be
+  at least 2% of the data energy, and the reversed maps must explain less
+  than half of it. `reports/mb1_flash_mapping_validation.json` records the
+  residuals, the noise evidence and which rule established each of the two
+  slices (`established_by`).
 - MB2: lambda-0 CG-SENSE per SMS group (tolerance 1e-6, at most 800
   iterations, `--tolerance`, `--max-iterations`) with the MB2 Wave operator,
   after a real-grid adjoint test (relative error at most 1e-5) and a synthetic
@@ -425,6 +438,14 @@ residual of each solution.
   negative Fourier-z convention that the mixed calibrations established; the
   ACS-versus-z-projection test re-checks it on every MB2 scan and the
   slice-reversal test on every MB1 scan.
+- The slice-reversal test of MB1 data decides by the residual limits on the
+  2026-10-15 and 2026-11-05 scans. Its explained-signal rule for
+  noise-dominated data has been exercised on one 7 T phantom session
+  (2026-11-16: 0.24 mm, Ry 3 and Ry 4, Wave and no-Wave), where the right
+  maps leave residuals of 0.83 to 0.95 on the two deciding slices and the
+  reversed maps explain 12 to 20% of the signal the stated maps explain. The
+  slice order of those scans was confirmed independently against a product
+  scan of the same prescription.
 - Transverse and transverse-dominant oblique prescriptions only. The
   reconstruction runs in the logical frame; the NIfTI affine of an oblique
   stack follows the header normal and has not been compared with DICOM.

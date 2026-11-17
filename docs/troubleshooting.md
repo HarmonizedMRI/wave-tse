@@ -121,8 +121,17 @@ must still pass. A setting that failed once fails again immediately; choose
 another setting.
 
 **`MB1/FLASH physical mapping not established`.** The MB1 slices match the
-slice-reversed FLASH maps at least as well as the stated ones. The slice
-mapping or the calibration geometry is wrong; do not reconstruct.
+slice-reversed FLASH maps at least as well as the stated ones, or do not
+match the stated ones clearly; see `reports/mb1_flash_mapping_validation.json`.
+A stated residual above the reversed one on any slice means that the slice
+mapping or the calibration geometry is wrong; do not reconstruct. A deciding
+slice with `established_by: null` missed the residual limits and either holds
+too little signal, or its noise is too low to explain the residual
+(`noise_only_residual` below the limits), which points to a poor fit rather
+than to noise: check the Wave PSF and the calibration. The noise estimate
+needs readout margins outside the native FOV (readout oversampling of at
+least 1.67). A report that failed is kept; to evaluate the same folder again,
+for example after a software update, move that report aside.
 
 **`MB2 operator tests failed` or `Group ... failed its finite/convergence
 gate`.** The failed report is saved with a time stamp in `reports/`. Increase

@@ -112,6 +112,17 @@ ACS_Z_MIN_MARGIN = 0.1
 # CG budget of the slice-reversal check of an undersampled MB1 grid.
 MB1_MAPPING_CG_ITERATIONS = 200
 MB1_MAPPING_CG_TOLERANCE = 1e-5
+# Slice-reversal check of MB1 data, on its second and fourth test slice: the
+# stated residual must stay below this limit and below this fraction of the
+# reversed residual.
+MB1_MAPPING_MAX_RESIDUAL = 0.4
+MB1_MAPPING_MAX_RESIDUAL_RATIO = 0.5
+# Where the noise alone exceeds a residual limit, the signal that each
+# candidate explains decides instead: it must be at least this share of the
+# data energy, and the reversed maps may explain at most this fraction of it.
+MB1_MAPPING_MIN_SIGNAL_SHARE = 0.02
+MB1_MAPPING_MAX_REVERSED_SIGNAL_RATIO = 0.5
+MB1_MAPPING_NOISE_SEED = 20261116  # synthetic noise of raw slice counter s uses this seed + s
 
 # L1-wavelet FISTA and its noise model; the FISTA defaults are those of the
 # TerraX 2026-10-25 R2x4 research reconstruction.
@@ -1908,11 +1919,19 @@ def verify_mb1_calibration_mapping(scan, basis, meta, calibration_folders, folde
 
     Only a global slice-axis reversal is compared, never per-voxel fitting or
     other permutations. The stated mapping must win on all five slices and
-    win clearly (residual below 0.4 and below half the reversed one) on the
-    second and fourth, which lie inside the well-supported stack. With the
-    y-sine Wave, a complete grid is first deconvolved exactly with the Wave
-    PSF of each slice. An undersampled grid has no coil images to project, so
-    the residual is then the data residual of a CG solve with each map.
+    win clearly on the second and fourth, which lie inside the well-supported
+    stack; :func:`mb1_mapping_decision` states the rule. With the y-sine Wave,
+    a complete grid is first deconvolved exactly with the Wave PSF of each
+    slice. An undersampled grid has no coil images to project, so the residual
+    is then the data residual of a CG solve with each map.
+
+    The residuals count the noise of the data, so noise-dominated data cannot
+    meet the residual limits even with the right maps. For a deciding slice
+    that misses them, the noise is therefore measured on the far readout
+    margins (:func:`margin_noise_energy`) and the share of noise that each fit
+    explains is determined (the same CG solve of synthetic white noise, or
+    1 / coils for the coil-vector projection), so that the decision can
+    compare the signal that the two candidates explain.
 
     Args:
         scan: Header-only TSE measurement.
@@ -1944,45 +1963,182 @@ def verify_mb1_calibration_mapping(scan, basis, meta, calibration_folders, folde
     for sli in slices:
         group = int(encoding["mapping"][sli])
         physical = int(encoding["pairs"][group][0])
+        candidates = (physical, nslices - 1 - physical)
         data, _ = load_group_data(scan, group, basis, encoding, nx_os, ny)
+        result = {"raw_sli": sli, "physical_index": physical}
+        deciding = sli in slices[1:4:2]
         if not complete:
             psf = np.ones((1, nx_os, ny), np.complex64)
             if is_wave:
                 psf = wave_psf(np.array([physical]), meta, cal_encoding, psf_fit, ny, use_z=False)
-            scores = [mb1_cg_mapping_residual(torch.from_numpy(data), candidate, encoding, group, psf,
-                                              calibration_folders, nx_os)
-                      for candidate in (physical, nslices - 1 - physical)]
-            results.append({"raw_sli": sli, "physical_index": physical, "stated_mapping_residual": scores[0],
-                            "reversed_mapping_residual": scores[1]})
+            kspace = torch.from_numpy(data)
+            scores = [mb1_cg_mapping_residual(kspace, candidate, encoding, group, psf, calibration_folders, nx_os)
+                      for candidate in candidates]
+            result.update(stated_mapping_residual=scores[0], reversed_mapping_residual=scores[1])
+            if deciding and not mb1_residual_limits_met(*scores):
+                lines = np.flatnonzero(encoding["mask"][group] > 0)
+                noise_energy = margin_noise_energy(kspace, lines, rows, nx_os * len(lines))
+                generator = torch.Generator(device="cpu").manual_seed(MB1_MAPPING_NOISE_SEED + sli)
+                noise = torch.randn(tuple(kspace.shape), dtype=torch.complex64, generator=generator)
+                # Share of noise alone that the same solve explains with each map.
+                floors = [1 - mb1_cg_mapping_residual(noise, candidate, encoding, group, psf, calibration_folders,
+                                                      nx_os) ** 2 for candidate in candidates]
+                mask = torch.from_numpy(encoding["mask"][group][None, None])
+                result.update(mb1_noise_evidence(scores, floors, noise_energy,
+                                                 float(torch.sum(abs(kspace * mask).double() ** 2))))
+            results.append(result)
             continue
-        data = torch.from_numpy(data) * torch.from_numpy(encoding["phase"][group, 0].conj())[None, None]
+        kspace = torch.from_numpy(data) * torch.from_numpy(encoding["phase"][group, 0].conj())[None, None]
         if is_wave:
             psf = wave_psf(np.array([physical]), meta, cal_encoding, psf_fit, ny, use_z=False)[0]
-            coils = ifftc_dim(ifftc_dim(data, 2) * torch.from_numpy(psf).conj()[None], 1)[:, rows]
+            coils = ifftc_dim(ifftc_dim(kspace, 2) * torch.from_numpy(psf).conj()[None], 1)[:, rows]
         else:
-            coils = ifftc_dim(ifftc_dim(data, 1), 2)[:, rows]
+            coils = ifftc_dim(ifftc_dim(kspace, 1), 2)[:, rows]
         scores = []
-        for candidate in (physical, nslices - 1 - physical):
+        for candidate in candidates:
             sens = torch.from_numpy(np.load(calibration_folders["cache"] / f"csm_slice_{candidate:02d}.npy"))
             image = (sens.conj() * coils).sum(0) / torch.sum(abs(sens)**2, 0).clamp_min(1e-12)
             scores.append(relative_norm(sens * image - coils, coils))
-        results.append({"raw_sli": sli, "physical_index": physical,
-                        "stated_mapping_residual": scores[0], "reversed_mapping_residual": scores[1]})
-    passed = all(r["stated_mapping_residual"] < r["reversed_mapping_residual"] for r in results)
-    for r in results[1:4:2]:
-        passed &= r["stated_mapping_residual"] < .4 and \
-            r["stated_mapping_residual"] < .5 * r["reversed_mapping_residual"]
+        result.update(stated_mapping_residual=scores[0], reversed_mapping_residual=scores[1])
+        if deciding and not mb1_residual_limits_met(*scores):
+            noise_energy = margin_noise_energy(kspace, np.arange(ny), rows, nx * ny)
+            # The projection onto one unit coil vector per pixel keeps 1 / coils of white noise.
+            floors = [1 / coils.shape[0]] * 2
+            result.update(mb1_noise_evidence(scores, floors, noise_energy,
+                                             float(torch.sum(abs(coils).double() ** 2))))
+        results.append(result)
+    passed = mb1_mapping_decision(results)
     method = "Full-grid native-FOV coil-vector projection onto fixed FLASH CSMs" + \
         (" after exact Wave-PSF deconvolution" if is_wave else "")
     if not complete:
         method = "Data residual of a one-band CG-SENSE solve of the undersampled grid with each fixed FLASH CSM"
     report = {"passed": bool(passed), "raw_sli_to_physical": encoding["mapping"].tolist(), "slices": results,
               "method": method,
+              "rule": f"stated residual below the reversed one on every slice; on the second and fourth, stated "
+                      f"residual < {MB1_MAPPING_MAX_RESIDUAL:g} and < {MB1_MAPPING_MAX_RESIDUAL_RATIO:g} x reversed, "
+                      f"or, where the margin noise alone exceeds such a limit, stated signal share >= "
+                      f"{MB1_MAPPING_MIN_SIGNAL_SHARE:g} and reversed signal share < "
+                      f"{MB1_MAPPING_MAX_REVERSED_SIGNAL_RATIO:g} x stated",
               "limitations": "Global reversal check; not an independent absolute scanner profile validation",
               "basis_sha256": digest(calibration_folders["cache"] / "global_coil_basis.npy")}
     save_json(path, report)
     if not passed:
         raise ValueError(f"MB1/FLASH physical mapping not established: {results}")
+
+
+def mb1_residual_limits_met(stated, reversed_residual):
+    """Return whether a deciding slice meets the residual limits of the MB1 mapping check.
+
+    Args:
+        stated, reversed_residual: Relative residuals with the stated and the
+            slice-reversed FLASH maps.
+
+    Returns:
+        bool: True when the stated residual is below 0.4 and below half the
+        reversed one.
+    """
+    return bool(stated < MB1_MAPPING_MAX_RESIDUAL and stated < MB1_MAPPING_MAX_RESIDUAL_RATIO * reversed_residual)
+
+
+def margin_noise_energy(kspace, lines, rows, samples):
+    """Estimate the noise energy of ``samples`` data samples from the far readout margins.
+
+    The outer 20% of the oversampled readout at each end receive no signal, so
+    their hybrid-space power is the noise power per readout sample and line.
+    The receiver filter makes the noise inside the FOV at least as large, so
+    the estimate is a lower bound.
+
+    Args:
+        kspace: Slice k-space (coil, Nx_os, Ny).
+        lines: Sampled PE lines.
+        rows: Native readout rows of the oversampled readout.
+        samples: Number of (readout sample, line) pairs whose noise energy is
+            wanted.
+
+    Returns:
+        float or None: Noise energy summed over the coils; None when the
+        margins would overlap the native FOV (too little readout
+        oversampling), in which case no noise estimate exists.
+    """
+    nx_os = kspace.shape[1]
+    margin = far_margin_rows(nx_os, L1_MARGIN_FRACTION)
+    if len(margin) // 2 > rows.start:
+        return None
+    hybrid = ifftc_dim(kspace[:, :, torch.as_tensor(lines)], dim=1)[:, torch.as_tensor(margin)]
+    return float(torch.sum(abs(hybrid).double() ** 2)) / (len(margin) * len(lines)) * samples
+
+
+def mb1_noise_evidence(residuals, floors, noise_energy, data_energy):
+    """Return the noise-corrected evidence of one deciding slice of the MB1 mapping check.
+
+    A fit that leaves the relative residual ``r`` explains the share
+    ``e = 1 - r**2`` of the data energy: the explained signal plus the share
+    ``f`` (the floor) of the noise. Taking the stated maps to explain all the
+    signal, ``e_stated = s + f_stated * (1 - s)`` gives the signal share
+    ``s = (e_stated - f_stated) / (1 - f_stated)``, and the reversed maps
+    explain the signal share ``e_reversed - f_reversed * (1 - s)``.
+
+    Args:
+        residuals: Relative residuals (stated, reversed).
+        floors: Share of white noise that each fit explains (stated, reversed).
+        noise_energy: :func:`margin_noise_energy` of the samples in the
+            residual, or None.
+        data_energy: Energy of those samples.
+
+    Returns:
+        dict: ``noise_floor_stated``, ``noise_floor_reversed``,
+        ``stated_signal_share``, ``reversed_signal_share`` and
+        ``noise_only_residual``, the residual that the margin noise alone
+        would leave with the stated maps (None without a noise estimate).
+    """
+    explained = [1 - value ** 2 for value in residuals]
+    signal = (explained[0] - floors[0]) / (1 - floors[0])
+    noise_only = None
+    if noise_energy is not None:
+        noise_only = float(np.sqrt((1 - floors[0]) * min(noise_energy / data_energy, 1)))
+    return {"noise_floor_stated": float(floors[0]), "noise_floor_reversed": float(floors[1]),
+            "stated_signal_share": float(signal),
+            "reversed_signal_share": float(explained[1] - floors[1] * (1 - signal)),
+            "noise_only_residual": noise_only}
+
+
+def mb1_mapping_decision(results):
+    """Decide the MB1 slice mapping from the test-slice results and record what decided.
+
+    The stated maps must give the lower residual on every test slice. On the
+    second and fourth slice they must also win clearly, by one of two rules:
+
+    - residual limits: stated residual below 0.4 and below half the reversed
+      one;
+    - explained signal, only where the noise measured on the readout margins
+      alone would leave a residual above one of those limits: the signal the
+      stated maps explain is at least 2% of the data energy, and the reversed
+      maps explain less than half of it.
+
+    Args:
+        results: Per test slice a dict with ``stated_mapping_residual`` and
+            ``reversed_mapping_residual``; deciding slices that miss the
+            residual limits also hold the :func:`mb1_noise_evidence` entries.
+            The function adds ``established_by`` (``"residual limits"``,
+            ``"explained signal"`` or None) to the deciding slices.
+
+    Returns:
+        bool: True when the stated mapping is established.
+    """
+    passed = all(r["stated_mapping_residual"] < r["reversed_mapping_residual"] for r in results)
+    for r in results[1:4:2]:
+        stated, reversed_residual = r["stated_mapping_residual"], r["reversed_mapping_residual"]
+        noise_only = r.get("noise_only_residual")
+        r["established_by"] = None
+        if mb1_residual_limits_met(stated, reversed_residual):
+            r["established_by"] = "residual limits"
+        elif noise_only is not None and \
+                noise_only >= min(MB1_MAPPING_MAX_RESIDUAL, MB1_MAPPING_MAX_RESIDUAL_RATIO * reversed_residual) and \
+                r["stated_signal_share"] >= MB1_MAPPING_MIN_SIGNAL_SHARE and \
+                r["reversed_signal_share"] < MB1_MAPPING_MAX_REVERSED_SIGNAL_RATIO * r["stated_signal_share"]:
+            r["established_by"] = "explained signal"
+        passed &= r["established_by"] is not None
+    return bool(passed)
 
 
 def mb1_cg_mapping_residual(data, candidate, encoding, group, psf, calibration_folders, nx_os):
