@@ -436,7 +436,7 @@ class L1Tests(unittest.TestCase):
         audit = {"MB": 2, "voxel_mm": [.5, 1., 3.], "center_sct_mm": [0., 0., 0.]}
         args = argparse.Namespace(l1_threshold_multiple=.5, l1_wavelet_levels=2, l1_max_iterations=40,
                                   l1_tolerance=1e-4, max_iterations=500, tolerance=1e-8, device="cpu",
-                                  min_free_gib=0)
+                                  min_free_gib=0, espirit_crop=0.0)
         rng = np.random.default_rng(43)
         with tempfile.TemporaryDirectory() as tmp:
             calibration_folders = cli.output_folders(Path(tmp) / "calibration")
@@ -482,6 +482,131 @@ class L1Tests(unittest.TestCase):
             report_path.write_text(json.dumps(report))
             with self.assertRaisesRegex(ValueError, "another noise profile"):
                 run(.5)
+
+
+def espirit_phantom_kspace(ncoil=6, n=48, seed=21):
+    """Return coil k-space of a disc in an empty FOV, fully sampled, for ESPIRiT tests.
+
+    Returns:
+        numpy.ndarray: complex64 (coil, n, n).
+    """
+    rng = np.random.default_rng(seed)
+    x, y = np.mgrid[:n, :n] - n / 2
+    image = (x ** 2 + y ** 2 < (n / 4) ** 2).astype(np.complex64)
+    coils = []
+    for _ in range(ncoil):
+        cx, cy = rng.uniform(-n / 2, n / 2, 2)
+        coils.append(np.exp(-((x - cx) ** 2 + (y - cy) ** 2) / (n ** 2 / 2) + 1j * rng.uniform(0, 2 * np.pi)))
+    coil_images = np.stack(coils) * image
+    kspace = np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(coil_images, axes=(1, 2)), norm="ortho"), axes=(1, 2))
+    noise = .002 * (rng.standard_normal(kspace.shape) + 1j * rng.standard_normal(kspace.shape))
+    return (kspace + noise).astype(np.complex64)
+
+
+def espirit_maps(kspace, crop):
+    """Return unit-RSS SigPy ESPIRiT maps (as the calibration normalizes them) and the eigenvalue map."""
+    import sigpy as sp
+    import sigpy.mri as mr
+    maps, eigenvalues = mr.app.EspiritCalib(kspace, calib_width=16, crop=crop, device=sp.Device(-1),
+                                            output_eigenvalue=True, show_pbar=False).run()
+    maps = np.asarray(maps, np.complex64)
+    power = np.sqrt(np.sum(abs(maps) ** 2, axis=0))
+    maps = maps / np.where(power >= 1e-8, power, 1) * (power >= 1e-8)
+    return maps, np.asarray(eigenvalues, np.float32).reshape(maps.shape[1:])
+
+
+class EspiritCropTests(unittest.TestCase):
+    """Check the ESPIRiT crop applied to the stored crop-0 maps and the tags of cropped results."""
+
+    def test_tags(self):
+        """Crop 0 keeps the published names; other crops get a _crop<C> suffix."""
+        self.assertEqual(cli.crop_suffix(0), "")
+        self.assertEqual(cli.crop_suffix(0.0), "")
+        self.assertEqual(cli.crop_suffix(.8), "_crop0p8")
+        self.assertEqual(cli.crop_suffix(.95), "_crop0p95")
+        self.assertEqual(cli.solver_tag(0), "lambda0")
+        self.assertEqual(cli.solver_tag(.8), "lambda0_crop0p8")
+
+    def test_retrospective_crop_equals_sigpy_crop(self):
+        """Crop-0 maps times (eigenvalue > C) equal SigPy's EspiritCalib(crop=C) maps."""
+        kspace = espirit_phantom_kspace()
+        maps0, eigenvalues = espirit_maps(kspace, 0)
+        with tempfile.TemporaryDirectory() as tmp:
+            folders = cli.output_folders(tmp)
+            cli.save_npy(folders["cache"] / "csm_slice_03.npy", maps0)
+            cli.save_npz(folders["arrays"] / "csm_diagnostics_03.npz", eigenvalues=eigenvalues,
+                         calibration_rss=np.ones(eigenvalues.shape, np.float32))
+            np.testing.assert_array_equal(cli.slice_maps(3, folders), maps0)
+            for crop in (.5, .8, .95):
+                direct, _ = espirit_maps(kspace, crop)
+                retro = cli.slice_maps(3, folders, crop)
+                self.assertTrue(0 < np.mean(np.any(retro != 0, axis=0)) < 1, crop)
+                np.testing.assert_allclose(retro, direct, atol=1e-5)
+                sens = cli.group_sensitivities([3, 3], folders, 3 * maps0.shape[1], crop)
+                self.assertEqual(tuple(sens.shape), (2, maps0.shape[0], 3 * maps0.shape[1], maps0.shape[2]))
+                rows = cli.native_rows(maps0.shape[1], 3 * maps0.shape[1])
+                np.testing.assert_array_equal(sens[1, :, rows].numpy(), retro)
+
+    def test_crop_needs_the_eigenvalues(self):
+        """A crop without a matching eigenvalue map stops; crop 0 never reads it."""
+        maps = np.ones((2, 8, 8), np.complex64) / np.sqrt(2)
+        with tempfile.TemporaryDirectory() as tmp:
+            folders = cli.output_folders(tmp)
+            cli.save_npy(folders["cache"] / "csm_slice_00.npy", maps)
+            np.testing.assert_array_equal(cli.slice_maps(0, folders), maps)
+            with self.assertRaisesRegex(ValueError, "No ESPIRiT eigenvalues"):
+                cli.slice_maps(0, folders, .8)
+            cli.save_npz(folders["arrays"] / "csm_diagnostics_00.npz", calibration_rss=np.ones((8, 8)))
+            with self.assertRaisesRegex(ValueError, "No ESPIRiT eigenvalues"):
+                cli.slice_maps(0, folders, .8)
+            (folders["arrays"] / "csm_diagnostics_00.npz").unlink()
+            cli.save_npz(folders["arrays"] / "csm_diagnostics_00.npz", eigenvalues=np.ones((8, 4)))
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                cli.slice_maps(0, folders, .8)
+
+    def test_argument_range(self):
+        """--espirit-crop accepts [0, 1) and defaults to 0."""
+        base = ["prog", "--tse-twix", "t.dat", "--tse-seq", "t.seq", "--output-dir", "out"]
+        with mock.patch("sys.argv", base):
+            self.assertEqual(cli.parse_arguments().espirit_crop, 0.0)
+        with mock.patch("sys.argv", base + ["--espirit-crop", ".8"]):
+            self.assertEqual(cli.parse_arguments().espirit_crop, .8)
+        for value in ("1", "-.1"):
+            with mock.patch("sys.argv", base + ["--espirit-crop", value]), \
+                    mock.patch("sys.stderr", new=open(os.devnull, "w")), self.assertRaises(SystemExit):
+                cli.parse_arguments()
+
+    def test_cropped_groups_are_tagged_and_share_the_folder(self):
+        """A cropped run writes lambda0_crop0p8 files next to the crop-0 ones and passes the crop to the maps."""
+        terms, _ = synthetic_mb2_group(seed=31)
+        meta = {"Nx": 32, "Ny": 128, "Nx_os": 96, "Nslices": 2}
+        encoding = {"pairs": np.array([[0, 1]]), "mask": terms["mask"][0, 0].numpy()[None]}
+        audit = {"MB": 2, "wave": False}
+        terms = dict(terms, raw_sli=0, physical=np.array([0, 1]),
+                     lines=np.flatnonzero(terms["mask"][0, 0].numpy()))
+        with tempfile.TemporaryDirectory() as tmp:
+            calibration_folders = cli.output_folders(Path(tmp) / "calibration")
+            folders = cli.output_folders(Path(tmp) / "tse")
+            cli.save_npy(calibration_folders["cache"] / "global_coil_basis.npy", np.eye(8, dtype=np.complex64))
+            results = {}
+            for crop in (0.0, .8):
+                args = argparse.Namespace(device="cpu", max_iterations=800, tolerance=1e-6, min_free_gib=0,
+                                          espirit_crop=crop)
+                with mock.patch.object(cli, "group_terms", return_value=terms) as loader, \
+                        mock.patch.object(cli.LOGGER, "disabled", True):
+                    results[crop] = cli.reconstruct_groups(None, meta, None, calibration_folders, folders, encoding,
+                                                           None, None, audit, args)
+                self.assertEqual(loader.call_args.args[-1], crop)
+            names = sorted(path.name for path in folders["arrays"].iterdir())
+            self.assertEqual(names, ["lambda0_complex_physical_slices.npy",
+                                     "lambda0_crop0p8_complex_physical_slices.npy",
+                                     "lambda0_crop0p8_group_00.npy", "lambda0_group_00.npy"])
+            self.assertTrue((folders["reports"] / "operator_tests.json").exists())
+            self.assertTrue((folders["reports"] / "operator_tests_crop0p8.json").exists())
+            plain = json.loads((folders["reports"] / "lambda0_group_00.json").read_text())
+            cropped = json.loads((folders["reports"] / "lambda0_crop0p8_group_00.json").read_text())
+            self.assertNotIn("espirit_crop", plain)
+            self.assertEqual(cropped["espirit_crop"], .8)
 
 
 class InputOutputTests(unittest.TestCase):

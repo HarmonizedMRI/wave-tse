@@ -152,6 +152,20 @@ stopped between the diagnostics and the map of these slices. Move the listed
 **GPU options.** `--device cuda` needs a CUDA-enabled PyTorch;
 `--csm-device 0` needs CuPy for SigPy. Without them, run on the CPU.
 
+**Noisy bands or blotches in the background of an accelerated scan.** With
+the default crop-0 maps every pixel of the FOV is an unknown, and the
+lambda-0 solution shows the amplified noise of the empty FOV in the g-factor
+pattern (bands spaced FOV/R along the accelerated axis). Reconstruct the same
+scan again into the same folder with `--espirit-crop 0.8`; the results are
+written as `lambda0_crop0p8_*` next to the crop-0 ones. See
+[ESPIRiT crop](reconstruction.md#espirit-crop-optional) for when a crop
+removes real signal.
+
+**`No ESPIRiT eigenvalues for the crop of physical slice ...`.** The
+calibration folder holds maps without their `arrays/csm_diagnostics_XX.npz`
+eigenvalue maps, which `--espirit-crop` needs. Reconstruct with a new
+`--calibration-dir`.
+
 ### L1-wavelet regularization
 
 **`L1-wavelet regularization is implemented for MB2 scans only`.** MB1 data

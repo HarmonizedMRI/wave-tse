@@ -174,8 +174,11 @@ resume from the saved checkpoints. See [Reconstruction](docs/reconstruction.md).
 
 For MB2 data, `--l1-threshold-multiple 0.5` adds an L1-wavelet regularized
 reconstruction whose band weights are scaled by the noise measured in the scan
-itself. On a CPU, `--csm-workers N` runs the ESPIRiT map estimation in N
-parallel processes.
+itself. `--espirit-crop 0.8` zeroes the coil maps outside the ESPIRiT support,
+which removes the amplified noise of an empty FOV; its results are tagged
+`_crop0p8` and share the output folder with the default crop-0 results. On a
+CPU, `--csm-workers N` runs the ESPIRiT map estimation in N parallel
+processes.
 
 `evaluation/compare_reconstructions.py` compares a reconstruction with a
 reference result, for example for a regression after a software update.

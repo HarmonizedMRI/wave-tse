@@ -91,6 +91,15 @@ or `_tol<t>` appended for FISTA settings other than the defaults. Results of
 several settings can share one folder; they reuse the lambda-0 solution, the
 noise profile and the noise-only solves.
 
+With `--espirit-crop C` for C > 0 (see [ESPIRiT crop](#espirit-crop-optional)),
+every solver file above carries the suffix `_crop<C>` instead: for C = 0.8
+`lambda0_crop0p8_group_XX.npy`, `nifti/lambda0_crop0p8_magnitude.nii.gz`,
+`reports/operator_tests_crop0p8.json`, `l1c0p5_crop0p8_*`,
+`l1_noise_profile_crop0p8.*` and `l1_noise_null_crop0p8_group_XX.json`, plus
+`reports/lambda0_crop0p8_settings.json`. Several crops therefore share one
+folder with the crop-0 results, the audit, the MB1 mapping check and the
+calibration; the input manifest does not record the crop.
+
 Nothing is overwritten. A rerun with the same inputs and settings resumes from
 the saved caches and checkpoints. A folder whose input manifest records other
 inputs or settings is rejected; use a new folder instead.
@@ -233,6 +242,32 @@ Fourier-z test establishes.
 Every group report records the solver information and the relative data
 residual. `--device cuda` runs the TSE solver on a GPU and `--csm-device 0`
 runs ESPIRiT on GPU 0 (needs CuPy); both default to the CPU.
+
+### ESPIRiT crop (optional)
+
+The calibration always stores crop-0 maps, which have unit coil RSS
+everywhere in the FOV, and the largest ESPIRiT eigenvalue of every pixel
+(`arrays/csm_diagnostics_XX.npz`). `--espirit-crop C` zeroes the maps where
+that eigenvalue is not above C when the slices are solved, which is what
+SigPy's `EspiritCalib(crop=C)` returns; the calibration folder is shared by
+every crop and is never recomputed for one. The default C = 0 keeps every
+pixel of the FOV as an unknown.
+
+With crop-0 maps the lambda-0 solution also estimates the empty pixels of
+the FOV. Pixels that alias onto each other then compete with empty
+positions, which raises the noise of the object and fills the background
+with amplified noise in the g-factor pattern. A crop removes those unknowns.
+It is worth it when the object fills only part of the FOV along the
+accelerated axis. On the 7 T 0.24 mm MB1 phantom scans of 2026-11-16 (Ry 3,
+no Wave), C = 0.8 lowered the median g-factor in the object from 1.3 to 1.7
+(p95 3.9 to 5.1) to 1.01 to 1.03 (p95 at most 1.10) and the background
+noise about tenfold, and the data residual did not rise. With the y-sine
+Wave the object noise fell 1.30 times. A crop also removes real signal where
+the calibration eigenvalue is low: compare the cropped volume with the
+crop-0 one, and do not crop slices whose object is weak in the calibration
+(an in vivo FLASH-based support of an earlier 7 T scan cut a third of the
+tissue of the inferior slices). The MB1 slice-reversal check always uses the
+crop-0 maps.
 
 ### L1-wavelet regularization (optional, MB2)
 

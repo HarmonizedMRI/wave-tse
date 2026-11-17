@@ -38,6 +38,11 @@ Description:
     also solved with L1-wavelet FISTA, starting from lambda 0, with band
     weights scaled by the measured noise of this scan.
 
+    The calibration always stores crop-0 ESPIRiT maps and their eigenvalues.
+    ``--espirit-crop C`` zeroes the maps where the largest eigenvalue is not
+    above C (SigPy's crop rule) when they are used; results of C > 0 are
+    tagged ``_crop<C>`` and can share the output folder with the crop-0 ones.
+
 Notes:
     - Every output file is written exclusively; nothing is overwritten.
       Rerunning with the same inputs and settings resumes from the saved
@@ -103,6 +108,8 @@ from utils.wave_psf_coefficient_processing import process_wave_yz_coefficients
 LOGGER = logging.getLogger("wave_tse_recon")
 ARTIFACT_FOLDERS = ("arrays", "cache", "nifti", "figures", "reports", "logs")
 ESPIRIT_CALIB_WIDTH = 24
+# ESPIRiT crop of the stored calibration maps; other crops are applied to
+# these maps when they are used (--espirit-crop).
 ESPIRIT_CROP = 0
 SOLVER_TAG = "lambda0"
 # Appended calibration: median receive-vector correlation of the ACS planes
@@ -218,16 +225,24 @@ def main():
     if audit["MB"] == 1:
         verify_mb1_calibration_mapping(tse_scan, basis, meta, calibration_folders, folders, encoding,
                                        cal_encoding, psf_fit, audit)
+    tag = solver_tag(args.espirit_crop)
+    if args.espirit_crop > 0:
+        ensure_json(folders["reports"] / f"{tag}_settings.json", crop_settings(args.espirit_crop))
+        LOGGER.info("ESPIRiT crop %g: coil maps zeroed where the largest eigenvalue is not above it; tag %s",
+                    args.espirit_crop, tag)
     image, reports = reconstruct_groups(tse_scan, meta, basis, calibration_folders, folders, encoding,
                                         cal_encoding, psf_fit, audit, args)
-    nifti = export_volume(image, tse_scan, audit, folders, SOLVER_TAG)
+    nifti = export_volume(image, tse_scan, audit, folders, tag)
     residuals = [r["relative_data_residual"] for r in reports]
-    ensure_json(folders["reports"] / f"{SOLVER_TAG}_completed.json", {
+    completed = {
         "groups": len(reports), "shape": list(image.shape), "voxel_size_mm": audit["voxel_mm"],
-        "volume_sha256": digest(folders["arrays"] / f"{SOLVER_TAG}_complex_physical_slices.npy"),
+        "volume_sha256": digest(folders["arrays"] / f"{tag}_complex_physical_slices.npy"),
         "relative_data_residual_min_median_max": [min(residuals), float(np.median(residuals)),
                                                   max(residuals)],
-        "nifti": nifti, "calibration_dir": str(calibration_folders["reports"].parent)})
+        "nifti": nifti, "calibration_dir": str(calibration_folders["reports"].parent)}
+    if args.espirit_crop > 0:
+        completed["espirit_crop"] = args.espirit_crop
+    ensure_json(folders["reports"] / f"{tag}_completed.json", completed)
     LOGGER.info("Reconstruction complete: %s", nifti["magnitude"])
     if args.l1_threshold_multiple is not None:
         reconstruct_l1(tse_scan, meta, basis, calibration_folders, folders, encoding, cal_encoding,
@@ -277,6 +292,11 @@ def parse_arguments():
     group.add_argument("--threads", type=int, help="CPU threads for PyTorch (default: PyTorch's choice).")
     group.add_argument("--virtual-coils", type=int, default=20,
                        help="Number of compressed virtual coils (default: 20).")
+    group.add_argument("--espirit-crop", type=float, default=0.0, metavar="C",
+                       help="Zero the coil maps where the largest ESPIRiT eigenvalue is not above C, as "
+                            "SigPy's crop does (default: 0, no crop). The calibration always stores "
+                            "crop-0 maps; results of C > 0 are tagged _crop<C> (e.g. lambda0_crop0p8) and "
+                            "may share the output folder.")
     group.add_argument("--max-iterations", type=int, default=800,
                        help="CG-SENSE iteration budget per MB2 group (default: 800).")
     group.add_argument("--tolerance", type=float, default=1e-6,
@@ -319,6 +339,8 @@ def parse_arguments():
         parser.error("--psf-fit-range needs 0 <= START < STOP")
     if args.csm_workers < 1 or (args.csm_workers > 1 and args.csm_device >= 0):
         parser.error("--csm-workers must be positive and needs --csm-device -1 when above 1")
+    if not 0 <= args.espirit_crop < 1:
+        parser.error("--espirit-crop must lie in [0, 1)")
     if args.l1_threshold_multiple is not None and not 0 < args.l1_threshold_multiple < np.inf:
         parser.error("--l1-threshold-multiple must be positive and finite")
     if args.l1_wavelet_levels < 1 or args.l1_max_iterations < 1 or not 0 < args.l1_tolerance < 1:
@@ -1810,19 +1832,73 @@ def load_group_data(scan, group, basis, encoding, nx_os, ny):
     return data, sli
 
 
-def group_sensitivities(physical, calibration_folders, nx_os):
+def crop_suffix(crop):
+    """Return the file-tag suffix of an ESPIRiT crop: ``""`` for 0, ``"_crop0p8"`` for 0.8."""
+    return "" if crop == 0 else "_crop" + f"{crop:g}".replace(".", "p")
+
+
+def solver_tag(crop):
+    """Return the file tag of the lambda-0 solution with ESPIRiT crop ``crop`` (``lambda0``, ``lambda0_crop0p8``)."""
+    return SOLVER_TAG + crop_suffix(crop)
+
+
+def crop_settings(crop):
+    """Return the settings record of a cropped solution, stored as ``reports/<tag>_settings.json``."""
+    return {"espirit_crop": crop,
+            "maps": "crop-0 ESPIRiT maps of the calibration folder, zeroed where the largest ESPIRiT eigenvalue "
+                    "(arrays/csm_diagnostics_XX.npz) is not above espirit_crop (SigPy's crop rule)",
+            "mb1_mapping_check": "uses the crop-0 maps"}
+
+
+def slice_maps(physical, calibration_folders, crop=0.0):
+    """Return the unit-RSS ESPIRiT maps of one physical slice with an optional crop.
+
+    The calibration stores crop-0 maps. A crop zeroes them where the largest
+    ESPIRiT eigenvalue of the slice is not above ``crop``, which is what
+    SigPy's ``EspiritCalib(crop=crop)`` returns.
+
+    Args:
+        physical: Zero-based physical slice index.
+        calibration_folders: Calibration output folders with the CSM cache and
+            the CSM diagnostics.
+        crop: Eigenvalue threshold in [0, 1); 0 returns the stored maps.
+
+    Returns:
+        numpy.ndarray: complex64 (virtual coil, Nx, Ny).
+
+    Raises:
+        ValueError: If the eigenvalue map is missing or does not match the maps.
+    """
+    maps = np.load(calibration_folders["cache"] / f"csm_slice_{physical:02d}.npy")
+    if crop == 0:
+        return maps
+    path = calibration_folders["arrays"] / f"csm_diagnostics_{physical:02d}.npz"
+    if not path.exists():
+        raise ValueError(f"No ESPIRiT eigenvalues for the crop of physical slice {physical}: {path}")
+    with np.load(path) as saved:
+        if "eigenvalues" not in saved.files:
+            raise ValueError(f"No ESPIRiT eigenvalues for the crop of physical slice {physical}: {path}")
+        eigenvalues = saved["eigenvalues"]
+    if eigenvalues.shape != maps.shape[1:]:
+        raise ValueError(f"Eigenvalue map {eigenvalues.shape} does not match the maps {maps.shape} of physical "
+                         f"slice {physical}")
+    return maps * (eigenvalues > crop)
+
+
+def group_sensitivities(physical, calibration_folders, nx_os, crop=0.0):
     """Return the oversampled-readout sensitivities of the bands of one group.
 
     Args:
         physical: Zero-based physical slice indices of the bands.
         calibration_folders: Calibration output folders with the CSM cache.
         nx_os: Oversampled readout size.
+        crop: ESPIRiT crop applied to the stored crop-0 maps (:func:`slice_maps`).
 
     Returns:
         torch.Tensor: complex64 (band, virtual coil, Nx_os, Ny), zero outside
-        the native readout rows.
+        the native readout rows and, with a crop, outside the map support.
     """
-    maps = [np.load(calibration_folders["cache"] / f"csm_slice_{p:02d}.npy") for p in physical]
+    maps = [slice_maps(p, calibration_folders, crop) for p in physical]
     return torch.stack([build_oversampled_sens(m[..., None], nx_os)[..., 0] for m in maps])
 
 
@@ -1859,7 +1935,8 @@ def wave_psf(physical, meta, cal_encoding, psf_fit, ny, use_z=True):
     return np.exp(1j * angle).astype(np.complex64)
 
 
-def group_terms(scan, group, meta, basis, calibration_folders, encoding, cal_encoding, psf_fit, audit, device):
+def group_terms(scan, group, meta, basis, calibration_folders, encoding, cal_encoding, psf_fit, audit, device,
+                crop=0.0):
     """Return the measured data and the encoding terms of one slice group.
 
     Args:
@@ -1873,6 +1950,7 @@ def group_terms(scan, group, meta, basis, calibration_folders, encoding, cal_enc
         psf_fit: ``prepare_psf`` coefficients or None without Wave.
         audit: ``audit_tse`` report.
         device: Torch device of the tensors.
+        crop: ESPIRiT crop of the sensitivities (:func:`slice_maps`).
 
     Returns:
         dict: Tensors ``data`` (virtual coil, Nx_os, Ny), ``sens`` (band,
@@ -1887,7 +1965,7 @@ def group_terms(scan, group, meta, basis, calibration_folders, encoding, cal_enc
     if audit["wave"]:
         psf = wave_psf(physical, meta, cal_encoding, psf_fit, ny, use_z=wave_axes(audit)[1])
     return {"data": torch.as_tensor(data, device=device),
-            "sens": group_sensitivities(physical, calibration_folders, nx_os).to(device),
+            "sens": group_sensitivities(physical, calibration_folders, nx_os, crop).to(device),
             "phase": torch.as_tensor(encoding["phase"][group], device=device),
             "psf": torch.as_tensor(psf, device=device),
             "mask": torch.as_tensor(encoding["mask"][group][None, None], device=device),
@@ -1918,9 +1996,11 @@ def verify_mb1_calibration_mapping(scan, basis, meta, calibration_folders, folde
     """Check five fully sampled MB1 slices against the stated and reversed FLASH maps.
 
     Only a global slice-axis reversal is compared, never per-voxel fitting or
-    other permutations. The stated mapping must win on all five slices and
-    win clearly on the second and fourth, which lie inside the well-supported
-    stack; :func:`mb1_mapping_decision` states the rule. With the y-sine Wave,
+    other permutations; the stored crop-0 maps are used whatever
+    ``--espirit-crop``, so one check serves every crop. The stated mapping
+    must win on all five slices and win clearly on the second and fourth,
+    which lie inside the well-supported stack; :func:`mb1_mapping_decision`
+    states the rule. With the y-sine Wave,
     a complete grid is first deconvolved exactly with the Wave PSF of each
     slice. An undersampled grid has no coil images to project, so the residual
     is then the data residual of a CG solve with each map.
@@ -2165,19 +2245,20 @@ def mb1_cg_mapping_residual(data, candidate, encoding, group, psf, calibration_f
     return relative_norm(mb2_wave_forward(image, sens, phase, wave, mask) - data * mask, data * mask)
 
 
-def operator_tests(sens, phase, psf, mask, folders, max_iterations, tolerance):
+def operator_tests(sens, phase, psf, mask, folders, max_iterations, tolerance, suffix=""):
     """Require real-grid adjoint and synthetic-recovery checks of the Wave operator (MB1 or MB2).
 
     Args:
         sens, phase, psf, mask: Encoding of the first measured group.
-        folders: TSE output folders; writes ``reports/operator_tests.json``.
+        folders: TSE output folders; writes ``reports/operator_tests<suffix>.json``.
         max_iterations, tolerance: CG settings of the measured groups.
+        suffix: :func:`crop_suffix` of the maps in ``sens``.
 
     Raises:
         ValueError: If the adjoint error exceeds 1e-5, the synthetic data
             residual exceeds 1e-3 or CG does not converge.
     """
-    path = folders["reports"] / "operator_tests.json"
+    path = folders["reports"] / f"operator_tests{suffix}.json"
     if path.exists():
         return
     generator = torch.Generator(device="cpu").manual_seed(20261015)
@@ -2195,7 +2276,8 @@ def operator_tests(sens, phase, psf, mask, folders, max_iterations, tolerance):
     residual = relative_norm(mb2_wave_forward(recovered, sens, phase, psf, mask) - ax, ax)
     report = {"adjoint_error": adjoint, "synthetic_data_residual": residual, "solver": info}
     if adjoint > 1e-5 or residual > 1e-3 or not info["converged"]:
-        save_json(folders["reports"] / f"operator_tests_failed_{time.strftime('%Y%m%d_%H%M%S')}.json", report)
+        save_json(folders["reports"] / f"operator_tests{suffix}_failed_{time.strftime('%Y%m%d_%H%M%S')}.json",
+                  report)
         raise ValueError(f"MB2 operator tests failed: {report}")
     save_json(path, report)
 
@@ -2208,6 +2290,7 @@ def reconstruct_groups(scan, meta, basis, calibration_folders, folders, encoding
     MB1 groups with the y-sine Wave or an undersampled grid use lambda-0
     CG-SENSE with the Wave PSF (or a unit PSF without Wave). Existing group
     checkpoints are reused after their digest and physical indices match.
+    Files carry :func:`solver_tag` of ``args.espirit_crop``.
 
     Args:
         scan: Header-only TSE measurement.
@@ -2219,7 +2302,8 @@ def reconstruct_groups(scan, meta, basis, calibration_folders, folders, encoding
         cal_encoding: ``audit_calibration`` result.
         psf_fit: ``prepare_psf`` coefficients or None without Wave.
         audit: ``audit_tse`` report.
-        args: Parsed arguments (device, iterations, tolerance, free space).
+        args: Parsed arguments (device, iterations, tolerance, free space,
+            ESPIRiT crop).
 
     Returns:
         tuple: complex64 volume (Nx, Ny, physical slice) in physical slice
@@ -2235,9 +2319,11 @@ def reconstruct_groups(scan, meta, basis, calibration_folders, folders, encoding
     image = np.zeros((nx, ny, nslices), np.complex64)
     reports = []
     basis_digest = digest(calibration_folders["cache"] / "global_coil_basis.npy")
+    crop = args.espirit_crop
+    tag = solver_tag(crop)
     for group, physical in enumerate(encoding["pairs"]):
-        path = folders["arrays"] / f"{SOLVER_TAG}_group_{group:02d}.npy"
-        report_path = folders["reports"] / f"{SOLVER_TAG}_group_{group:02d}.json"
+        path = folders["arrays"] / f"{tag}_group_{group:02d}.npy"
+        report_path = folders["reports"] / f"{tag}_group_{group:02d}.json"
         if path.exists() and report_path.exists():
             report = json.loads(report_path.read_text())
             if digest(path) != report["checkpoint_sha256"] or report["physical_indices_0based"] != physical.tolist():
@@ -2249,7 +2335,7 @@ def reconstruct_groups(scan, meta, basis, calibration_folders, folders, encoding
         else:
             require_free_space(folders["arrays"], args.min_free_gib)
             terms = group_terms(scan, group, meta, basis, calibration_folders, encoding, cal_encoding,
-                                psf_fit, audit, device)
+                                psf_fit, audit, device, crop)
             data, sens, phase, psf, mask = (terms[key] for key in ("data", "sens", "phase", "psf", "mask"))
             if audit["MB"] == 1 and not audit["wave"] and np.all(encoding["mask"][group] == 1):
                 result, prediction = mb1_least_squares(data, sens, phase)
@@ -2258,7 +2344,8 @@ def reconstruct_groups(scan, meta, basis, calibration_folders, folders, encoding
             else:
                 # MB2, and MB1 with the y-sine Wave or an undersampled grid as a
                 # one-band problem.
-                operator_tests(sens, phase, psf, mask, folders, args.max_iterations, args.tolerance)
+                operator_tests(sens, phase, psf, mask, folders, args.max_iterations, args.tolerance,
+                               crop_suffix(crop))
                 result, info = cg_sense_mb2_wave_2d(data, sens, phase, psf, mask, n_iter=args.max_iterations,
                                                     tol=args.tolerance, lambda_l2=0, verbose=False,
                                                     return_info=True)
@@ -2269,22 +2356,24 @@ def reconstruct_groups(scan, meta, basis, calibration_folders, folders, encoding
                       "solver": info,
                       "relative_data_residual": relative_norm(prediction - data * mask, data * mask),
                       "device": str(device), "shared_basis_sha256": basis_digest}
+            if crop > 0:
+                report["espirit_crop"] = crop
             if not np.isfinite(recovered).all() or not info["converged"]:
-                save_json(folders["reports"] / f"{SOLVER_TAG}_group_{group:02d}_failed_"
+                save_json(folders["reports"] / f"{tag}_group_{group:02d}_failed_"
                           f"{time.strftime('%Y%m%d_%H%M%S')}.json", report)
                 raise ValueError(f"Group {group} failed its finite/convergence gate")
             save_npy(path, recovered)
             report["checkpoint_sha256"] = digest(path)
             save_json(report_path, report)
-            LOGGER.info("Group %d/%d physical %s residual %.6f", group + 1, len(encoding["pairs"]),
-                        physical.tolist(), report["relative_data_residual"])
+            LOGGER.info("Group %d/%d physical %s residual %.6f%s", group + 1, len(encoding["pairs"]),
+                        physical.tolist(), report["relative_data_residual"], f" ({tag})" if crop > 0 else "")
             del terms, data, sens, phase, psf, mask, result, prediction
             gc.collect()
             if device.type == "cuda":
                 torch.cuda.empty_cache()
         image[:, :, physical] = recovered.transpose(1, 2, 0)
         reports.append(report)
-    path = folders["arrays"] / f"{SOLVER_TAG}_complex_physical_slices.npy"
+    path = folders["arrays"] / f"{tag}_complex_physical_slices.npy"
     if not path.exists():
         save_npy(path, image)
     elif not np.array_equal(np.load(path), image):
@@ -2341,22 +2430,25 @@ def l1_settings(args):
         args: Parsed command-line arguments.
 
     Returns:
-        dict: Penalty, FISTA and noise-model settings, stored as
-        ``reports/<tag>_settings.json``; results of the same tag with other
-        settings are rejected.
+        dict: Penalty, FISTA and noise-model settings (and the ESPIRiT crop
+        when it is not 0), stored as ``reports/<tag>_settings.json``; results
+        of the same tag with other settings are rejected.
     """
-    return {"threshold_multiple": args.l1_threshold_multiple, "wavelet": L1_WAVELET,
-            "levels": args.l1_wavelet_levels,
-            "penalty": "complex soft threshold of each band image separately on the native rows; "
-                       "coarsest approximation band not penalized",
-            "lambda": "C * sigma_b * mean diag(A^H A)_b after far-margin whitening",
-            "fista_max_iterations": args.l1_max_iterations, "fista_tolerance": args.l1_tolerance,
-            "start": "lambda-0 solution", "lipschitz": "1.05 x 30-iteration power estimate",
-            "sigma_region": f"FLASH calibration RSS > {L1_REGION_THRESHOLD:g} x slice peak (crop-0 maps)",
-            "noise_null_seed": f"{L1_NULL_SEED} + group",
-            "noise_model": {"far_margin_fraction_per_side": L1_MARGIN_FRACTION,
-                            "outer_line_fraction": L1_OUTER_LINE_FRACTION,
-                            "profile_group": "number of groups // 2", "profile_seed": L1_PROFILE_SEED}}
+    settings = {"threshold_multiple": args.l1_threshold_multiple, "wavelet": L1_WAVELET,
+                "levels": args.l1_wavelet_levels,
+                "penalty": "complex soft threshold of each band image separately on the native rows; "
+                           "coarsest approximation band not penalized",
+                "lambda": "C * sigma_b * mean diag(A^H A)_b after far-margin whitening",
+                "fista_max_iterations": args.l1_max_iterations, "fista_tolerance": args.l1_tolerance,
+                "start": "lambda-0 solution", "lipschitz": "1.05 x 30-iteration power estimate",
+                "sigma_region": f"FLASH calibration RSS > {L1_REGION_THRESHOLD:g} x slice peak (crop-0 maps)",
+                "noise_null_seed": f"{L1_NULL_SEED} + group",
+                "noise_model": {"far_margin_fraction_per_side": L1_MARGIN_FRACTION,
+                                "outer_line_fraction": L1_OUTER_LINE_FRACTION,
+                                "profile_group": "number of groups // 2", "profile_seed": L1_PROFILE_SEED}}
+    if args.espirit_crop > 0:
+        settings["espirit_crop"] = args.espirit_crop
+    return settings
 
 
 def pad_native(images, rows, nx_os):
@@ -2480,7 +2572,9 @@ def estimate_noise_profile(scan, meta, basis, calibration_folders, folders, enco
     """Estimate, or reload, the readout noise-variance profile of this scan.
 
     Uses the central slice group and its lambda-0 solution; see
-    :func:`noise_profile_from_fit`.
+    :func:`noise_profile_from_fit`. With an ESPIRiT crop the files carry its
+    :func:`crop_suffix`, because the fit and its lambda-0 solution depend on
+    the maps.
 
     Args:
         scan, meta, basis, calibration_folders, encoding, cal_encoding, psf_fit, audit:
@@ -2500,8 +2594,9 @@ def estimate_noise_profile(scan, meta, basis, calibration_folders, folders, enco
             :func:`l1_group_whitening` or :func:`noise_profile_from_fit`
             fails.
     """
-    cache = folders["cache"] / "l1_noise_profile.npz"
-    report_path = folders["reports"] / "l1_noise_profile.json"
+    suffix = crop_suffix(args.espirit_crop)
+    cache = folders["cache"] / f"l1_noise_profile{suffix}.npz"
+    report_path = folders["reports"] / f"l1_noise_profile{suffix}.json"
     if cache.exists() and report_path.exists():
         report = json.loads(report_path.read_text())
         if digest(cache) != report["profile_sha256"]:
@@ -2514,7 +2609,7 @@ def estimate_noise_profile(scan, meta, basis, calibration_folders, folders, enco
     rows = native_rows(nx, nx_os)
     group = len(encoding["pairs"]) // 2
     terms = group_terms(scan, group, meta, basis, calibration_folders, encoding, cal_encoding, psf_fit, audit,
-                        torch.device(args.device))
+                        torch.device(args.device), args.espirit_crop)
     start = pad_native(baseline[:, :, terms["physical"]].transpose(2, 0, 1), rows, nx_os)
     prediction = mb2_wave_forward(start.to(terms["data"].device), terms["sens"], terms["phase"], terms["psf"],
                                   terms["mask"])
@@ -2532,7 +2627,7 @@ def estimate_noise_profile(scan, meta, basis, calibration_folders, folders, enco
         """Return the mean of a readout profile in each nonempty readout region."""
         return {name: float(profile[index].mean()) for name, index in regions.items() if len(index)}
 
-    figure = folders["figures"] / "l1_noise_profile.png"
+    figure = folders["figures"] / f"l1_noise_profile{suffix}.png"
     if not figure.exists():
         plot_noise_profile(result, level, rows, margin, figure)
     report = {"method": "lambda-0 residual power of the outer PE lines divided by the residual power that "
@@ -2663,7 +2758,8 @@ def reconstruct_l1(scan, meta, basis, calibration_folders, folders, encoding, ca
     Per group: far-margin whitening, a noise-only lambda-0 solve that sets
     sigma_b, and FISTA from the lambda-0 solution with
     ``lambda_b = C * sigma_b * mean diag(A^H A)_b``. The noise-only results
-    do not depend on C and are shared by every L1 setting of the folder.
+    do not depend on C and are shared by every L1 setting of the folder with
+    the same ESPIRiT crop; a crop tags every file with its :func:`crop_suffix`.
 
     Args:
         scan, meta, basis, calibration_folders, encoding, cal_encoding, psf_fit, audit:
@@ -2683,7 +2779,9 @@ def reconstruct_l1(scan, meta, basis, calibration_folders, folders, encoding, ca
     nx, ny, nx_os, nslices = (int(meta[key]) for key in ("Nx", "Ny", "Nx_os", "Nslices"))
     rows = native_rows(nx, nx_os)
     device = torch.device(args.device)
-    tag = l1_tag(args.l1_threshold_multiple, args.l1_wavelet_levels, args.l1_max_iterations, args.l1_tolerance)
+    suffix = crop_suffix(args.espirit_crop)
+    tag = l1_tag(args.l1_threshold_multiple, args.l1_wavelet_levels, args.l1_max_iterations,
+                 args.l1_tolerance) + suffix
     ensure_json(folders["reports"] / f"{tag}_settings.json", l1_settings(args))
     profile, profile_digest = estimate_noise_profile(scan, meta, basis, calibration_folders, folders, encoding,
                                                      cal_encoding, psf_fit, audit, args, baseline)
@@ -2705,13 +2803,13 @@ def reconstruct_l1(scan, meta, basis, calibration_folders, folders, encoding, ca
         else:
             require_free_space(folders["arrays"], args.min_free_gib)
             terms = group_terms(scan, group, meta, basis, calibration_folders, encoding, cal_encoding, psf_fit,
-                                audit, device)
+                                audit, device, args.espirit_crop)
             start = pad_native(baseline[:, :, physical].transpose(2, 0, 1), rows, nx_os).to(device)
             prediction = mb2_wave_forward(start, terms["sens"], terms["phase"], terms["psf"], terms["mask"])
             cov, whitener, whitening = l1_group_whitening(terms, prediction)
             del prediction
             # The noise-only solve does not depend on C; it is saved once per group and profile.
-            null_path = folders["reports"] / f"l1_noise_null_group_{group:02d}.json"
+            null_path = folders["reports"] / f"l1_noise_null{suffix}_group_{group:02d}.json"
             if null_path.exists():
                 null = json.loads(null_path.read_text())
                 if null["noise_profile_sha256"] != profile_digest or \
@@ -2760,7 +2858,8 @@ def reconstruct_l1(scan, meta, basis, calibration_folders, folders, encoding, ca
     ensure_json(folders["reports"] / f"{tag}_completed.json", {
         "groups": len(reports), "shape": list(image.shape), "voxel_size_mm": audit["voxel_mm"],
         "volume_sha256": digest(path), "noise_profile_sha256": profile_digest,
-        "lambda0_volume_sha256": digest(folders["arrays"] / f"{SOLVER_TAG}_complex_physical_slices.npy"),
+        "lambda0_volume_sha256": digest(folders["arrays"] /
+                                        f"{solver_tag(args.espirit_crop)}_complex_physical_slices.npy"),
         "fista_converged_groups": sum(bool(r["fista"]["converged"]) for r in reports),
         "relative_data_residual_min_median_max": [min(residuals), float(np.median(residuals)),
                                                   max(residuals)],
